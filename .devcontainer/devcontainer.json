@@ -2,10 +2,7 @@
   "name": "langchain-agent",
   "image": "mcr.microsoft.com/devcontainers/python:3.10", 
   "features": {
-    "ghcr.io/devcontainers/features/github-cli:1": {},
-    "devcontainers/features/pipx:1": {
-      "packages": "gradio langchain"
-    }
+    "ghcr.io/devcontainers/features/github-cli:1": {}
   },
   "customizations": {
     "vscode": {
@@ -20,6 +17,6 @@
   "postCreateCommand": "pip install -r requirements.txt",
   "forwardPorts": [7860],
   "remoteEnv": {
-    "API_KEY": "${{ secrets.API_KEY }}"
+    "API_KEY": "$API_KEY"
   }
 }
