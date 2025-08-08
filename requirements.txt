@@ -7,3 +7,5 @@ python-dotenv>=1.0.1
 together>=0.2.11
 requests>=2.31.0
 langchain-together
+amadeus
+pydantic>=2.6.0

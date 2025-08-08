@@ -2,8 +2,33 @@ from datetime import datetime
 from langchain.tools import Tool
 from requests import get
 
+WEATHER_CODE_MAP = {
+    0: "Clear sky",
+    1: "Mainly clear",
+    2: "Partly cloudy",
+    3: "Overcast",
+    45: "Fog",
+    48: "Depositing rime fog",
+    51: "Light drizzle",
+    53: "Moderate drizzle",
+    55: "Dense drizzle",
+    61: "Slight rain",
+    63: "Moderate rain",
+    65: "Heavy rain",
+    71: "Slight snow fall",
+    73: "Moderate snow fall",
+    75: "Heavy snow fall",
+    80: "Rain showers",
+    81: "Heavy rain showers",
+    82: "Violent rain showers",
+    95: "Thunderstorm",
+    96: "Thunderstorm with slight hail",
+    99: "Thunderstorm with heavy hail",
+}
+
 
 def get_lat_lon(city: str):
+    print(f"[API CALL] Open-Meteo: get_lat_lon(city={city})")
     """
     Uses Open-Meteo's geocoding API to get latitude and longitude for a city.
     """
@@ -27,6 +52,7 @@ def get_lat_lon(city: str):
 
 
 def get_weather(city: str, date: str) -> str:
+    print(f"[API CALL] Open-Meteo: get_weather(city={city}, date={date})")
     """
     Gets weather for the given city and date using Open-Meteo API.
     If forecast is not available for the date, returns current weather.
@@ -68,8 +94,7 @@ def get_weather(city: str, date: str) -> str:
                 precip = daily["precipitation_sum"][0]
 
                 return (
-                    f"Weather forecast for {city} on {date}:\n"
-                    f"Max Temp: {tmax}°C, Min Temp: {tmin}°C, Precipitation: {precip}mm"
+                    f"Weather forecast for {city} on {date}: Max {tmax}°C / Min {tmin}°C, Precip {precip} mm"
                 )
         except Exception:
             pass
@@ -91,12 +116,11 @@ def get_weather(city: str, date: str) -> str:
         if current:
             temp = current.get("temperature")
             wind = current.get("windspeed")
-            weather = current.get("weathercode")
-
+            code = current.get("weathercode")
+            desc = WEATHER_CODE_MAP.get(code, f"Code {code}")
             return (
-                f"Current weather in {city}:\n"
-                f"Temperature: {temp}°C, Windspeed: {wind} km/h, Weather code: {weather}\n"
-                f"(Forecast for {date} is not available; showing current weather.)"
+                f"Current weather in {city}: {desc}, Temp {temp}°C, Wind {wind} km/h. "
+                f"(Forecast for {date} not available; showing current.)"
             )
         else:
             return f"Could not retrieve weather data for {city}."

@@ -16,8 +16,9 @@ def suggest_destinations(preferences: str) -> str:
     )
 
     try:
-        return llm.invoke(prompt)
-    except Exception as e:
+        res = llm.invoke(prompt)
+        return str(getattr(res, 'content', res))
+    except Exception:
         return "Sorry, I couldn't generate destination suggestions at this time."
 
 
