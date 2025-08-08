@@ -1,27 +1,37 @@
-from agents.trip_planner_agent import get_trip_planner_agent
+from agents.conversation_agent import run_conversation_graph
 import gradio as gr
-
-
-class DummyAgent:
-    def plan_trip(self, prompt):
-        return f"Echo: {prompt}"
 
 
 class TripPlannerUI:
     def __init__(self):
-        # self.agent = get_trip_planner_agent()
-        self.agent = DummyAgent()
+        self.run_conversation_graph = run_conversation_graph
+        self.context = {}
 
-    def agent_chat(self, prompt):
-        response = self.agent.plan_trip(prompt)
-
-        return response
+    def agent_chat(self, prompt, chat_history):
+        state = self.run_conversation_graph(prompt, chat_history, self.context)
+        if isinstance(state, dict) and 'context' in state and state['context']:
+            self.context = state['context']
+        return state
 
     def respond(self, message, chat_history):
-        response = self.agent_chat(message)
         chat_history = chat_history or []
-        chat_history.append((message, response))
+        # Normalize history structure to list of dicts
+        if chat_history and isinstance(chat_history[0], (list, tuple)):
+            normalized = []
+            for user, agent in chat_history:
+                normalized.append({"role": "user", "content": user})
+                normalized.append({"role": "assistant", "content": agent})
+            chat_history = normalized
 
+        state = self.agent_chat(message, chat_history)
+        chat_history.append({"role": "user", "content": message})
+        if isinstance(state, dict):
+            resp_text = state.get('response', '')
+            missing_info = state.get('missing_info', False)
+        else:
+            resp_text = str(state)
+            missing_info = False
+        chat_history.append({"role": "assistant", "content": resp_text})
         return "", chat_history
 
     def launch(self):
@@ -67,19 +77,16 @@ class TripPlannerUI:
 
         with gr.Blocks(theme=gr.themes.Soft(), title="Trip Planner AI") as demo:
             gr.HTML(css)
-            gr.Markdown(
-                """
-                # 🌍 Trip Planner AI
-                Plan your next adventure with an AI-powered travel assistant. Ask about destinations, flights, activities, budgets, and more!
-                """
-            )
-            chatbot = gr.Chatbot(show_label=False)
-
+            gr.Markdown("""# 🌍 Trip Planner AI\nPlan your adventure: ask for destinations, flights, activities, weather, budget.""")
+            chatbot = gr.Chatbot(show_label=False, type='messages')
             with gr.Row():
                 txt = gr.Textbox(placeholder="Enter your travel query...", show_label=False, scale=8)
-                send_btn = gr.Button("Send", scale=0.5)
-
+                send_btn = gr.Button("Send", scale=1)
+                reset_btn = gr.Button("Reset", scale=1)
             txt.submit(self.respond, [txt, chatbot], [txt, chatbot])
             send_btn.click(self.respond, [txt, chatbot], [txt, chatbot])
-
+            def do_reset():
+                self.context = {}
+                return [], []
+            reset_btn.click(lambda: ("", []), outputs=[txt, chatbot]).then(lambda: do_reset(), outputs=[chatbot, chatbot])
         demo.launch()

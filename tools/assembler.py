@@ -15,7 +15,8 @@ def assemble_itinerary(trip_data: dict) -> str:
         "Highlight important info like flights, weather, activities, and budget summary."
     )
 
-    return llm.invoke(prompt)
+    res = llm.invoke(prompt)
+    return str(getattr(res, 'content', res))
 
 
 def get_assembler_tool():
