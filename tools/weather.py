@@ -1,6 +1,7 @@
 from datetime import datetime
 from langchain.tools import Tool
 from requests import get
+from functools import lru_cache
 
 WEATHER_CODE_MAP = {
     0: "Clear sky",
@@ -27,6 +28,7 @@ WEATHER_CODE_MAP = {
 }
 
 
+@lru_cache(maxsize=128)
 def get_lat_lon(city: str):
     print(f"[API CALL] Open-Meteo: get_lat_lon(city={city})")
     """

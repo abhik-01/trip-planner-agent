@@ -3,419 +3,680 @@ from __future__ import annotations
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from typing import Dict, Any, List
-import re, asyncio, time
+import re
 from datetime import date
+from concurrent.futures import ThreadPoolExecutor
+import time
 
 from tools.destination import get_destination_tool
-from utils.set_llm import get_llm
 from classTypes.class_types import TripPlannerState
-from utils.plan import build_plan, replan
-from utils.tooling import run_tool, validate_flights, validate_weather, extract_min_price
-from utils.models import PlanStep
+from agents.trip_planner_agent import trip_planner_node
+from utils.set_llm import get_llm
 
 ConversationAgentState = TripPlannerState
 
-ALLOWED_CONTEXT_KEYS = {
-    'destination','start_date','end_date','number_of_travelers','interests','user_city','budget',
-    'proposed_start_date','user_currency','duration_days','committed_start_date'
-}
-
-SLOT_ORDER = [
-    'user_city',
-    'destination',
-    'start_date',
-    'duration_days',
-    'number_of_travelers'
-]
-
-def _history_to_text(chat_history: List[Dict[str,str]]):
-    lines = []
-    for msg in chat_history[-12:]:
+def _classify_user_intent(user_input: str, chat_history: List[Dict[str,str]]) -> Dict[str, Any]:
+    """Use LLM to understand what the user actually wants"""
+    llm = get_llm(temperature=0.3)
+    
+    # Build recent context
+    recent_context = ""
+    for msg in chat_history[-6:]:
         if isinstance(msg, dict):
-            r = msg.get('role'); c = msg.get('content')
-            if r and c:
-                lines.append(f"{r.capitalize()}: {c}")
-    return "\n".join(lines)
+            role = msg.get('role', 'unknown')
+            content = msg.get('content', '')
+            recent_context += f"{role}: {content}\n"
+    
+    prompt = f"""Analyze the user's intent and classify their request:
 
-def _classify_intent(user_input: str, history: str) -> str:
-    prompt = f"""Classify the user's primary intent into exactly one label: SMALLTALK, EXPLORE, or PLAN.
-SMALLTALK: greetings, chit chat, general non-planning questions.
-EXPLORE: asking for destination ideas, vague preferences, browsing.
-PLAN: providing/asking for concrete trip logistics (dates, origin city, budget, flights, itinerary) OR selecting a destination to proceed.
-History (recent):\n{history}\nUser: {user_input}\nReturn only the label."""
+Recent conversation:
+{recent_context}
+
+Current user message: "{user_input}"
+
+Determine:
+1. Intent: "explore" (asking for suggestions, browsing options) OR "plan" (ready to book/plan specific trip) OR "chat" (general conversation)
+2. If exploring, what are they exploring? (destinations, activities, etc.)
+3. If planning, what specific destination/details do they have?
+4. Are they asking for suggestions or ready to commit to planning?
+
+Return JSON with: {{"intent": "explore|plan|chat", "exploring": "string or null", "planning_destination": "string or null", "ready_to_plan": true/false}}
+"""
+    
     try:
-        raw = get_llm().invoke(prompt).content.strip().upper()
-        label = raw.split()[0].strip(',.;!')
-        if label not in {'SMALLTALK','EXPLORE','PLAN'}:
-            return 'PLAN'
-        return label
+        response = llm.invoke(prompt).content.strip()
+        # Extract JSON from response
+        import json
+        json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group())
+    except Exception as e:
+        print(f"Intent classification failed: {e}")
+    
+    # Fallback heuristics
+    lower_input = user_input.lower()
+    if any(word in lower_input for word in ['suggest', 'recommend', 'ideas', 'where', 'places', 'destinations']):
+        return {"intent": "explore", "exploring": "destinations", "planning_destination": None, "ready_to_plan": False}
+    elif any(word in lower_input for word in ['plan', 'book', 'itinerary', 'lets go', "let's go"]):
+        return {"intent": "plan", "exploring": None, "planning_destination": None, "ready_to_plan": True}
+    elif any(word in lower_input for word in [
+        'flight', 'price', 'cost', 'fare', 'ticket', 'how much',  # flights
+        'weather', 'temperature', 'rain', 'climate', 'forecast',  # weather
+        'activities', 'things to do', 'attractions', 'sightseeing',  # activities
+        'nearby', 'around', 'close to', 'near', 'vicinity',  # nearby places
+        'budget', 'expense', 'money', 'spend'  # budget
+    ]):
+        # All trip-specific questions should be handled as chat to reference previous data
+        return {"intent": "chat", "exploring": None, "planning_destination": None, "ready_to_plan": False}
+    else:
+        return {"intent": "chat", "exploring": None, "planning_destination": None, "ready_to_plan": False}
+
+def _handle_exploration(user_input: str, intent_data: Dict[str, Any], context: Dict[str, Any]) -> str:
+    """Handle exploration requests - suggestions, browsing, etc. with async optimization"""
+    
+    exploring = intent_data.get('exploring', '').lower()
+    
+    if 'destination' in exploring or 'places' in exploring or not exploring:
+        # Use destination suggestion tool with parallel LLM processing
+        try:
+            def get_suggestions():
+                dest_tool = get_destination_tool()
+                return dest_tool.func(user_input)
+            
+            def get_context_response():
+                llm = get_llm()
+                prompt = f"""Based on the user's request "{user_input}", create a brief, enthusiastic introduction for destination suggestions. Keep it to 1-2 sentences."""
+                return llm.invoke(prompt).content.strip()
+            
+            # Run both operations in parallel
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                suggestions_future = executor.submit(get_suggestions)
+                intro_future = executor.submit(get_context_response)
+                
+                # Get results with timeout
+                try:
+                    suggestions = suggestions_future.result(timeout=10)
+                    intro = intro_future.result(timeout=5)
+                except Exception:
+                    # Fallback if parallel execution fails
+                    suggestions = get_suggestions()
+                    intro = "Here are some great destination ideas for you:"
+            
+            # Combine results
+            response = f"{intro}\n\n{suggestions}\n\nWhich of these catches your interest? Just tell me the destination name when you're ready to start planning!"
+            return response
+            
+        except Exception as e:
+            print(f"[DEBUG] Exploration tool failed: {e}")
+            return "I'd love to suggest some amazing destinations! Could you tell me what kind of experience you're looking for?"
+    
+    # For other types of exploration, use LLM
+    llm = get_llm()
+    prompt = f"""The user is exploring travel options: "{user_input}"
+
+Provide helpful, enthusiastic suggestions. Be conversational and engaging. End with a question to keep the conversation flowing.
+"""
+    
+    try:
+        return llm.invoke(prompt).content.strip()
     except Exception:
-        return 'PLAN'
+        return "That sounds exciting! What kind of travel experience are you looking for?"
 
-def _extract_slots(user_input: str, context: Dict[str,Any]) -> Dict[str,Any]:
-    updated = {}
-    t = user_input.lower()
-    # Travelers
-    m = re.search(r'(?:for|we are|we\'re|with)?\s*(\d{1,2})\s*(?:traveler|travellers|travelers|people|persons|ppl|guys)', t)
-    if m:
-        try:
-            num = int(m.group(1))
-            if 0 < num < 20:
-                updated['number_of_travelers'] = num
-        except:  # noqa
-            pass
-    # Duration
-    m = re.search(r'(\d{1,2})\s*(?:day|days)\b', t)
-    if m:
-        try:
-            d = int(m.group(1))
-            if 1 <= d <= 60:
-                updated['duration_days'] = d
-        except:  # noqa
-            pass
-    # ISO date
-    m = re.search(r'(20\d{2}-\d{2}-\d{2})', user_input)
-    if m and not context.get('committed_start_date'):
-        updated['start_date'] = m.group(1)
-    # Month mention
-    months = {m.lower(): i+1 for i,m in enumerate(['January','February','March','April','May','June','July','August','September','October','November','December'])}
-    for name, idx in months.items():
-        if re.search(rf'\b{name.lower()}\b', t) and not context.get('committed_start_date') and not context.get('start_date'):
-            today = date.today(); year = today.year if idx >= today.month else today.year + 1
-            updated['proposed_start_date'] = date(year, idx, 10).isoformat(); break
-    # Origin city
-    m = re.search(r'from\s+([A-Z][A-Za-z\s]{2,40})', user_input)
-    if m and not context.get('user_city'):
-        city = m.group(1).strip(); 
-        if len(city.split()) <= 4: updated['user_city'] = city
-    # Budget
-    m = re.search(r'(?:USD|US\$|\$)\s?(\d{2,6})', user_input)
-    if m: updated['budget'] = f"USD {m.group(1)}"
-    # Destination selection
-    if not context.get('destination'):
-        m = re.search(r'(?:do|pick|choose|select|go to|let\'s do)\s+([A-Z][A-Za-z]{2,30})', user_input)
-        if m: updated['destination'] = m.group(1)
-    # Currency inference
-    cur = re.search(r'\b(INR|USD|EUR|GBP|JPY|AUD|CAD)\b', user_input.upper())
-    if cur and not context.get('user_currency'): updated['user_currency'] = cur.group(1)
-    if context.get('committed_start_date') and 'start_date' in updated: updated.pop('start_date', None)
-    return {k:v for k,v in updated.items() if k in ALLOWED_CONTEXT_KEYS}
+def _handle_general_chat(user_input: str, context: Dict[str, Any]) -> str:
+    """Handle general conversation, greetings, and specific questions about previous plans"""
+    
+    # Check if user is asking about specific aspects of their previous trip planning
+    if _is_trip_specific_inquiry(user_input, context):
+        return _handle_trip_specific_inquiry(user_input, context)
+    
+    llm = get_llm()
+    
+    prompt = f"""You are a friendly travel planning assistant. The user said: "{user_input}"
 
-def _next_missing_slot(context: Dict[str,Any]) -> str|None:
-    for slot in SLOT_ORDER:
-        if slot == 'start_date' and context.get('committed_start_date'): continue
-        if not context.get(slot): return slot
-    return None
+Respond naturally and conversationally. If it's a greeting, greet back warmly. If they seem interested in travel, gently guide toward travel planning. Keep it brief and friendly.
+"""
+    
+    try:
+        return llm.invoke(prompt).content.strip()
+    except Exception:
+        return "Hello! I'm here to help you plan amazing trips. What kind of adventure are you thinking about?"
 
-def _init_slot_status(ctx: Dict[str,Any]):
-    ss = ctx.get('slot_status') or {}
-    for s in SLOT_ORDER:
-        if s not in ss: ss[s] = 'unfilled'
-        if ctx.get(s): ss[s] = 'committed'
-    if ctx.get('committed_start_date'): ss['start_date'] = 'committed'
-    ctx['slot_status'] = ss
-    return ss
 
-def _provenance_commit(ctx: Dict[str,Any], extracted: Dict[str,Any]):
-    prov = ctx.get('_provenance', {})
-    ts = time.time()
-    for k,v in extracted.items():
-        if k not in ctx or not ctx.get(k):
-            ctx[k] = v
-            prov[k] = {'value': v, 'source': 'user', 'ts': ts}
-    ctx['_provenance'] = prov
+def _is_trip_specific_inquiry(user_input: str, context: Dict[str, Any]) -> bool:
+    """Check if the user is asking about specific aspects of their previous trip"""
+    
+    # Must have previous trip data to answer specific questions
+    if not context.get('last_trip_data') or not context.get('tool_results'):
+        return False
+    
+    inquiry_keywords = {
+        'weather': ['weather', 'temperature', 'rain', 'climate', 'forecast'],
+        'activities': ['activities', 'things to do', 'attractions', 'places to visit', 'sightseeing'],
+        'nearby': ['nearby', 'around', 'close to', 'near', 'vicinity', 'surroundings'],
+        'budget': ['budget', 'cost', 'expense', 'price', 'money', 'spend'],
+        'flights': ['flight', 'plane', 'airline', 'airport', 'fly'],
+        'accommodation': ['hotel', 'stay', 'accommodation', 'lodging'],
+        'food': ['food', 'restaurant', 'eat', 'cuisine', 'dining']
+    }
+    
+    user_lower = user_input.lower()
+    for category, keywords in inquiry_keywords.items():
+        if any(keyword in user_lower for keyword in keywords):
+            return True
+    
+    return False
+
+
+def _handle_trip_specific_inquiry(user_input: str, context: Dict[str, Any]) -> str:
+    """Handle specific questions about different aspects of the planned trip"""
+    
+    last_trip_data = context.get('last_trip_data', {})
+    tool_results = context.get('tool_results', {})
+    destination = last_trip_data.get('destination', 'your destination')
+    
+    user_lower = user_input.lower()
+    
+    # Weather inquiries
+    if any(keyword in user_lower for keyword in ['weather', 'temperature', 'rain', 'climate', 'forecast']):
+        return _handle_weather_inquiry(user_input, last_trip_data, tool_results)
+    
+    # Activity inquiries  
+    elif any(keyword in user_lower for keyword in ['activities', 'things to do', 'attractions', 'places to visit', 'sightseeing']):
+        return _handle_activity_inquiry(user_input, last_trip_data, tool_results)
+    
+    # Nearby places inquiries
+    elif any(keyword in user_lower for keyword in ['nearby', 'around', 'close to', 'near', 'vicinity', 'surroundings']):
+        return _handle_nearby_inquiry(user_input, last_trip_data, tool_results)
+    
+    # Budget inquiries
+    elif any(keyword in user_lower for keyword in ['budget', 'cost', 'expense', 'money', 'spend']):
+        return _handle_budget_inquiry(user_input, last_trip_data, tool_results)
+    
+    # Flight inquiries (existing function)
+    elif any(keyword in user_lower for keyword in ['flight', 'plane', 'airline', 'airport', 'fly']):
+        return _handle_flight_inquiry(user_input, context)
+    
+    # General trip summary
+    else:
+        return _handle_general_trip_inquiry(user_input, last_trip_data, tool_results)
+
+
+def _handle_weather_inquiry(user_input: str, trip_data: dict, tool_results: dict) -> str:
+    """Handle weather-related questions using LLM for natural responses"""
+    
+    destination = trip_data.get('destination')
+    start_date = trip_data.get('start_date')
+    weather_data = tool_results.get('weather')
+    
+    if not weather_data:
+        return f"I don't have weather information for {destination} from our previous planning. Would you like me to check the current weather forecast?"
+    
+    if 'error' in str(weather_data).lower():
+        return f"I had trouble getting weather data for {destination} earlier: {weather_data}. Would you like me to try again?"
+    
+    # Use LLM to generate natural response
+    llm = get_llm()
+    prompt = f"""The user asked: "{user_input}"
+
+I have weather information for their {destination} trip:
+Travel date: {start_date or 'Not specified'}
+Weather data: {weather_data}
+
+Provide a natural, helpful response about the weather. Be conversational and include practical travel advice based on the weather conditions. Keep it concise but informative.
+"""
+    
+    try:
+        response = llm.invoke(prompt)
+        return str(getattr(response, 'content', response))
+    except Exception:
+        # Fallback to basic response
+        return f"Here's the weather for your {destination} trip: {weather_data}"
+
+
+def _handle_activity_inquiry(user_input: str, trip_data: dict, tool_results: dict) -> str:
+    """Handle activity-related questions using LLM for natural responses"""
+    
+    destination = trip_data.get('destination')
+    activities_data = tool_results.get('activities')
+    
+    if not activities_data:
+        return f"I don't have activity suggestions for {destination} from our previous planning. Would you like me to suggest some activities for you?"
+    
+    # Use LLM to generate natural response
+    llm = get_llm()
+    prompt = f"""The user asked: "{user_input}"
+
+I have activity suggestions for their {destination} trip:
+{activities_data}
+
+Provide a natural, enthusiastic response about these activities. Help them understand what makes each activity special and offer to provide more details about any specific activity they're interested in. Be conversational and helpful.
+"""
+    
+    try:
+        response = llm.invoke(prompt)
+        return str(getattr(response, 'content', response))
+    except Exception:
+        # Fallback to basic response
+        return f"Here are the activities for your {destination} trip: {activities_data}"
+
+
+def _handle_nearby_inquiry(user_input: str, trip_data: dict, tool_results: dict) -> str:
+    """Handle nearby places questions using LLM for natural responses"""
+    
+    destination = trip_data.get('destination')
+    nearby_data = tool_results.get('nearby')
+    
+    if not nearby_data:
+        return f"I don't have nearby places information for {destination} from our previous planning. Would you like me to find nearby attractions and points of interest?"
+    
+    if 'error' in str(nearby_data).lower() or 'not found' in str(nearby_data).lower():
+        return f"I had trouble finding nearby places for {destination}: {nearby_data}. Would you like me to search again?"
+    
+    # Use LLM to generate natural response
+    llm = get_llm()
+    prompt = f"""The user asked: "{user_input}"
+
+I have information about nearby places around {destination}:
+{nearby_data}
+
+Provide a natural, informative response about these nearby places. Help them understand what's special about each location and how they might fit into their travel itinerary. Be enthusiastic and offer additional help.
+"""
+    
+    try:
+        response = llm.invoke(prompt)
+        return str(getattr(response, 'content', response))
+    except Exception:
+        # Fallback to basic response
+        return f"Here are nearby places around {destination}: {nearby_data}"
+
+
+def _handle_budget_inquiry(user_input: str, trip_data: dict, tool_results: dict) -> str:
+    """Handle budget-related questions using LLM for natural responses"""
+    
+    destination = trip_data.get('destination')
+    duration = trip_data.get('duration_days')
+    travelers = trip_data.get('number_of_travelers')
+    budget_data = tool_results.get('budget')
+    
+    if not budget_data:
+        return f"I don't have budget information for your {destination} trip from our previous planning. Would you like me to create a budget estimate for you?"
+    
+    # Use LLM to generate natural response
+    llm = get_llm()
+    prompt = f"""The user asked: "{user_input}"
+
+I have budget information for their {destination} trip:
+Duration: {duration} days
+Travelers: {travelers}
+Budget breakdown: {budget_data}
+
+Provide a natural, helpful response about the trip budget. Explain the costs in a conversational way and offer suggestions for saving money or adjusting the budget if needed. Be practical and supportive.
+"""
+    
+    try:
+        response = llm.invoke(prompt)
+        return str(getattr(response, 'content', response))
+    except Exception:
+        # Fallback to basic response
+        return f"Here's your {destination} trip budget: {budget_data}"
+
+
+def _handle_general_trip_inquiry(user_input: str, trip_data: dict, tool_results: dict) -> str:
+    """Handle general questions about the planned trip using LLM for natural responses"""
+    
+    destination = trip_data.get('destination')
+    
+    if not destination:
+        return "I don't have information about a previous trip. Would you like to start planning a new trip?"
+    
+    # Use LLM to generate natural response about the trip
+    llm = get_llm()
+    
+    # Prepare trip summary
+    trip_summary = f"""
+Destination: {destination}
+Duration: {trip_data.get('duration_days', 'Not specified')} days
+Travelers: {trip_data.get('number_of_travelers', 'Not specified')}
+Start Date: {trip_data.get('start_date', 'Not specified')}
+Departure City: {trip_data.get('user_city', 'Not specified')}
+
+Available Information:
+"""
+    
+    if tool_results.get('flights'):
+        trip_summary += f"- Flight options: {len(tool_results['flights']) if isinstance(tool_results['flights'], list) else 'Available'}\n"
+    if tool_results.get('weather'):
+        trip_summary += "- Weather forecast: Available\n"
+    if tool_results.get('activities'):
+        trip_summary += "- Activity suggestions: Available\n"
+    if tool_results.get('nearby'):
+        trip_summary += "- Nearby places: Available\n"
+    if tool_results.get('budget'):
+        trip_summary += "- Budget breakdown: Available\n"
+    
+    prompt = f"""The user asked: "{user_input}"
+
+Here's their trip information:
+{trip_summary}
+
+Provide a natural, enthusiastic summary of their trip plan. Highlight the exciting aspects and offer to provide more details about any specific aspect they're interested in. Be conversational and helpful.
+"""
+    
+    try:
+        response = llm.invoke(prompt)
+        return str(getattr(response, 'content', response))
+    except Exception:
+        # Fallback to basic response
+        available_info = []
+        if tool_results.get('flights'):
+            available_info.append("flight options")
+        if tool_results.get('weather'):
+            available_info.append("weather forecast")
+        if tool_results.get('activities'):
+            available_info.append("activity suggestions")
+        if tool_results.get('nearby'):
+            available_info.append("nearby places")
+        if tool_results.get('budget'):
+            available_info.append("budget breakdown")
+        
+        if available_info:
+            return f"I have {', '.join(available_info)} for your {destination} trip. What would you like to know more about?"
+        else:
+            return f"I have basic information about your {destination} trip. Would you like me to help plan more details?"
+
+
+def _handle_flight_inquiry(user_input: str, context: Dict[str, Any]) -> str:
+    """Handle specific flight-related questions using LLM for natural responses"""
+    
+    # Check if we have previous trip data
+    last_trip_data = context.get('last_trip_data')
+    tool_results = context.get('tool_results')
+    
+    if not last_trip_data or not tool_results or 'flights' not in tool_results:
+        # No flight data available, provide helpful guidance
+        return ("I don't have flight information from our previous conversation. When I create a complete trip plan, I gather flight details including prices. Would you like me to search for flights for a specific route? Please provide your departure city, destination, and travel date.")
+    
+    flights_data = tool_results['flights']
+    destination = last_trip_data.get('destination')
+    user_city = last_trip_data.get('user_city')
+    start_date = last_trip_data.get('start_date')
+    
+    # Check if there was an error in flight search
+    if isinstance(flights_data, list) and flights_data and 'error' in flights_data[0]:
+        error_msg = flights_data[0]['error']
+        return f"I had trouble finding flights for your {destination} trip: {error_msg}. Would you like me to try searching again with different criteria?"
+    
+    if not isinstance(flights_data, list) or not flights_data:
+        return f"I couldn't find flight options for your {destination} trip from {user_city}. This might be because {destination} doesn't have a direct airport or the route needs connecting flights."
+    
+    # Use LLM to generate natural response about flights
+    llm = get_llm()
+    
+    # Prepare flight summary
+    flight_summary = f"""
+Route: {user_city} to {destination}
+Travel date: {start_date or 'Not specified'}
+Number of flight options: {len(flights_data)}
+
+Flight details:
+"""
+    
+    for i, flight in enumerate(flights_data[:3], 1):  # Show top 3 flights
+        flight_summary += f"""
+Option {i}: {flight.get('airline', 'Unknown')}
+- Price: ₹{flight.get('price_in_inr', 'N/A')} INR (Original: {flight.get('currency', '')} {flight.get('price', 'N/A')})
+- Departure: {flight.get('departure_time', 'N/A')}
+- Route: {flight.get('departure_airport', 'N/A')} → {flight.get('arrival_airport', 'N/A')}
+"""
+    
+    prompt = f"""The user asked: "{user_input}"
+
+I have flight information for their trip:
+{flight_summary}
+
+Provide a natural, helpful response about the flight options. Be conversational and highlight the key details like prices, airlines, and timing. Offer to provide more specific details if they're interested in any particular flight. Be enthusiastic but practical.
+"""
+    
+    try:
+        response = llm.invoke(prompt)
+        return str(getattr(response, 'content', response))
+    except Exception:
+        # Fallback to structured response
+        cheapest_flight = min(flights_data, key=lambda x: x.get('price', float('inf')))
+        return f"I found {len(flights_data)} flight options for your {destination} trip from {user_city}. The cheapest option is {cheapest_flight.get('airline', 'N/A')} at ₹{cheapest_flight.get('price_in_inr', 'N/A')} INR. Would you like more details about the flight options?"
+
+def _extract_planning_details(user_input: str, context: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract trip details only when user is actually ready to plan"""
+    llm = get_llm(temperature=0.2)
+    
+    # Get conversation context to understand what they might be referring to
+    recent_destinations = []
+    chat_context = context.get('_chat_context', '')
+    
+    prompt = f"""Extract specific trip planning details from: "{user_input}"
+
+Context from conversation: {chat_context}
+
+Only extract details that are EXPLICITLY mentioned or clearly implied. 
+
+Return JSON with any of these keys (only if stated/implied):
+- destination: specific place name (if user says "plan a trip from delhi" and we were discussing Rajasthan, destination could be inferred)
+- origin: departure city  
+- date: travel date (YYYY-MM-DD if possible)
+- duration: number of days
+- travelers: number of people
+- budget: budget amount
+
+Current context: {context}
+Return JSON only.
+"""
+    
+    try:
+        response = llm.invoke(prompt).content.strip()
+        import json
+        json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        if json_match:
+            extracted = json.loads(json_match.group())
+            # Only return valid extractions
+            valid_data = {}
+            for key, value in extracted.items():
+                if value and str(value).strip():
+                    valid_data[key] = value
+            return valid_data
+    except Exception as e:
+        print(f"Detail extraction failed: {e}")
+    
+    # Fallback: simple keyword extraction
+    fallback_data = {}
+    lower_input = user_input.lower()
+    
+    # Extract duration
+    duration_match = re.search(r'(\d+)\s*days?', lower_input)
+    if duration_match:
+        fallback_data['duration'] = int(duration_match.group(1))
+    
+    # Extract travelers
+    traveler_match = re.search(r'(\d+)\s*(?:people|person|travelers?)', lower_input)
+    if traveler_match:
+        fallback_data['travelers'] = int(traveler_match.group(1))
+    
+    # Extract origin city
+    from_match = re.search(r'from\s+([A-Za-z\s]+?)(?:\s|$|,)', user_input, re.IGNORECASE)
+    if from_match:
+        fallback_data['origin'] = from_match.group(1).strip().title()
+    
+    return fallback_data
 
 def conversation_agent(state: ConversationAgentState):
+    """Modern, intelligent conversation agent that handles exploration and planning naturally"""
+    
+    user_input = state.get('user_input', '')
     chat_history = state.get('chat_history', []) or []
-    user_input = state.get('user_input','')
-    ctx = state.get('context', {}) or {}
-    history = _history_to_text(chat_history)
-    intent = _classify_intent(user_input, history)
-    state['planning_stage'] = 'plan' if intent == 'PLAN' else ('explore' if intent=='EXPLORE' else 'smalltalk')
-    extracted = _extract_slots(user_input, ctx)
-    _provenance_commit(ctx, extracted)
-    # Accept proposed date
-    if ctx.get('proposed_start_date') and any(t in user_input.lower() for t in ['use that','yes','ok','okay','sounds good','works','go with that']):
-        ctx['committed_start_date'] = ctx['proposed_start_date']
-        ctx['slot_status'] = ctx.get('slot_status', {})
-        ctx['slot_status']['start_date'] = 'committed'
-    # Auto commit ISO start_date
-    if ctx.get('start_date') and re.match(r'^20\d{2}-\d{2}-\d{2}$', str(ctx['start_date'])):
-        ctx['committed_start_date'] = ctx['start_date']
-    _init_slot_status(ctx)
-    missing = _next_missing_slot(ctx)
-    if state['planning_stage'] == 'smalltalk':
-        state['response'] = 'Tell me about the trip you have in mind or ask for ideas.'
-        state['context'] = ctx; state['missing_info']=True if missing else False
-        return state
-    if state['planning_stage'] == 'explore':
-        tool = get_destination_tool()
-        try: ideas = tool.run(user_input or 'diverse travel preferences')
-        except Exception: ideas = 'Here are some varied destinations to consider.'
-        follow = 'Pick one to start planning.'
-        state['response'] = ideas+"\n\n"+follow
-        state['context'] = ctx; state['missing_info']=True
-        return state
-    if missing:
-        prompts = {
-            'user_city': 'What city will you depart from?',
-            'destination': 'Where do you want to go?',
-            'start_date': 'What start date? (YYYY-MM-DD or month name)',
-            'duration_days': 'How many days?',
-            'number_of_travelers': 'How many travelers?'
+    context = state.get('context', {}) or {}
+    
+    # Keep track of conversation context for better understanding
+    recent_mentions = []
+    for msg in chat_history[-6:]:
+        if isinstance(msg, dict) and msg.get('role') == 'assistant':
+            content = msg.get('content', '')
+            # Extract place names mentioned in recent responses
+            place_matches = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', content)
+            recent_mentions.extend([p for p in place_matches if len(p) > 3])
+    
+    context['_recent_mentions'] = list(set(recent_mentions))
+    context['_chat_context'] = ' '.join([msg.get('content', '')[:100] for msg in chat_history[-3:] if isinstance(msg, dict)])
+    
+    # Classify user intent with LLM
+    intent_data = _classify_user_intent(user_input, chat_history)
+    intent = intent_data.get('intent', 'chat')
+    
+    print(f"[DEBUG] User intent: {intent_data}")
+    
+    # Handle different intents
+    if intent == 'explore':
+        response = _handle_exploration(user_input, intent_data, context)
+        return {
+            'response': response,
+            'context': context,
+            'planning_stage': 'explore',
+            'missing_info': False
         }
-        if missing=='start_date' and ctx.get('proposed_start_date'):
-            state['response'] = f"Proposed date {ctx['proposed_start_date']}. Say 'use that' or give another." 
-        else:
-            state['response'] = prompts.get(missing, f"Provide {missing}.")
-        ctx['slot_status'][missing] = 'asked'
-        state['context']=ctx; state['missing_info']=True
-        return state
-    # Build or re-build plan (signature-based)
-    core_sig = (
-        ctx.get('user_city'),
-        ctx.get('destination'),
-        ctx.get('committed_start_date'),
-        ctx.get('duration_days'),
-        ctx.get('number_of_travelers')
-    )
-    prior_sig = state.get('plan_sig')
-    if not state.get('plan') or prior_sig is None:
-        state['plan'] = build_plan(ctx)
-        state['tool_cursor']=0; state['tool_results']={}; state['errors']=[]
-        state['plan_sig']=core_sig
-    else:
-        if core_sig != prior_sig:
-            # core context changed -> full rebuild
-            state['plan'] = build_plan(ctx)
-            state['tool_cursor']=0; state['tool_results']={}; state['errors']=[]
-            state['plan_sig']=core_sig
-            state['response'] = 'Context changed, recalculating plan.'
-        else:
-            state['plan'] = replan(ctx, state['plan'])
-    return planner_act(state)
-
-async def _execute_step(step: PlanStep, ctx: Dict[str,Any]):
-    name = step.step
-    if name == 'flights':
-        from tools.flight import get_flight_tool, format_flights_for_display
-        tool = get_flight_tool()
-        result = await run_tool('flights', tool.func, ctx.get('user_city'), ctx.get('destination'), ctx.get('committed_start_date'), ctx.get('number_of_travelers') or 1)
-        if not result.ok:
-            return False, {'error': result.error}
-        validation = validate_flights(result.data)
-        offers = validation['offers']
-        if not offers:
-            return False, {'error': 'no_valid_flights'}
-        display = format_flights_for_display([o.model_dump() for o in offers])
-        min_price = extract_min_price(offers)
-        payload = {'raw': [o.model_dump() for o in offers], 'display': display, 'min_price': min_price, 'issues': validation['errors']}
-        return True, payload
-    if name == 'weather':
-        from tools.weather import get_weather_tool
-        tool = get_weather_tool()
-        result = await run_tool('weather', tool.func, ctx.get('destination'), ctx.get('committed_start_date'))
-        if not result.ok:
-            return False, {'error': result.error}
-        vw = validate_weather(result.data, ctx.get('committed_start_date'), ctx.get('destination'))
-        return True, {'raw': result.data, 'snapshot': vw.get('snapshot').model_dump() if vw.get('snapshot') else None}
-    if name == 'activities':
-        from tools.activity import get_activity_tool
-        tool = get_activity_tool(); result = await run_tool('activities', tool.func, ctx.get('destination'))
-        return (result.ok, {'data': result.data} if result.ok else {'error': result.error})
-    if name == 'nearby':
-        from tools.map import get_map_tool
-        tool = get_map_tool(); result = await run_tool('nearby', tool.func, ctx.get('destination'), 'tourism')
-        return (result.ok, {'data': result.data} if result.ok else {'error': result.error})
-    if name == 'budget':
-        from tools.budget import get_budget_tool
-        tool = get_budget_tool(); trip_details = {
-            'destination': ctx.get('destination'),
-            'flight_cost': ctx.get('flight_cost',''),
-            'nights': max((ctx.get('duration_days') or 1)-1,1),
-            'travelers': ctx.get('number_of_travelers') or 1,
-            'activities': [],
-            'days': ctx.get('duration_days') or 1
+    
+    elif intent == 'chat':
+        response = _handle_general_chat(user_input, context)
+        return {
+            'response': response,
+            'context': context,
+            'planning_stage': 'chat',
+            'missing_info': False
         }
-        result = await run_tool('budget', tool.func, trip_details)
-        return (result.ok, {'data': result.data} if result.ok else {'error': result.error})
-    if name == 'assemble':
-        from tools.assembler import get_assembler_tool
-        tool = get_assembler_tool(); payload = {**ctx}
-        result = await run_tool('assemble', tool.func, payload)
-        return (result.ok, {'data': result.data} if result.ok else {'error': result.error})
-    return False, {'error':'unknown_step'}
+    
+    elif intent == 'plan':
+        # Extract planning details
+        extracted = _extract_planning_details(user_input, context)
+        
+        # Update context with extracted details
+        for key, value in extracted.items():
+            if key == 'origin':
+                context['user_city'] = value
+            elif key == 'date':
+                context['start_date'] = value
+            elif key == 'duration':
+                context['duration_days'] = value
+            elif key == 'travelers':
+                context['number_of_travelers'] = value
+            else:
+                context[key] = value
+        
+        # Check if we have enough to start planning
+        has_destination = bool(context.get('destination'))
+        
+        # Smart destination inference from recent conversation
+        if not has_destination and context.get('_recent_mentions'):
+            # If user says "plan a trip" after we discussed destinations, try to infer
+            llm = get_llm(temperature=0.3)
+            mentions = context['_recent_mentions'][:5]  # Limit to avoid token overflow
+            
+            prompt = f"""The user said: "{user_input}"
 
-def _progress(plan: List[PlanStep]):
-    done = [s.step for s in plan if s.status=='done']
-    running = [s.step for s in plan if s.status=='running']
-    pending = [s.step for s in plan if s.status in ('pending','error','skipped') and s.step not in running]
-    return f"Progress | done: {done} running: {running} pending: {pending}".strip()
+Recently mentioned places in our conversation: {mentions}
 
-def planner_act(state: ConversationAgentState):
-    ctx = state.get('context', {})
-    plan: List[PlanStep] = state.get('plan', [])
-    cursor = state.get('tool_cursor',0)
-    if cursor >= len(plan):
-        return planner_reflect(state)
-    step = plan[cursor]
-    step.status='running'
-    async def run_current():
-        ok, payload = await _execute_step(step, ctx)
-        if ok:
-            step.status='done'
-            if step.step=='flights' and isinstance(payload.get('raw'), list):
-                try:
-                    prices=[f.get('price') for f in payload['raw'] if isinstance(f,dict) and 'price' in f and isinstance(f['price'],(int,float))]
-                    if prices: ctx['flight_cost']=min(prices)
-                except: pass
-            if step.step=='weather' and payload.get('snapshot'):
-                ctx['weather_snapshot']=payload['snapshot']
-            state.setdefault('tool_results',{})[step.step]=payload
-        else:
-            step.status='error'; step.error = payload.get('error')
-            state.setdefault('errors',[]).append(f"{step.step}:{step.error}")
-        state['tool_cursor']=cursor+1
-    asyncio.run(run_current())
-    if state['tool_cursor'] < len(plan):
-        state['response']=_progress(plan)
-        state['context']=ctx
-        return state
-    return planner_reflect(state)
+Are they likely referring to one of these places for their trip planning? If yes, which one? If unclear, return "unclear".
 
-def planner_reflect(state: ConversationAgentState):
-    plan: List[PlanStep] = state.get('plan', [])
-    ctx = state.get('context', {})
-    errors = state.get('errors', [])
-    summary = []
-    for s in plan:
-        if s.status=='error': summary.append(f"{s.step} failed ({s.error})")
-        elif s.status=='skipped': summary.append(f"{s.step} skipped")
-    if not state.get('response') or state['response'].startswith('Progress'):
-        state['response'] = 'Plan complete.'
-    if summary:
-        state['response'] += "\nIssues: " + "; ".join(summary)
-    state['context']=ctx
-    state['missing_info']=False
-    return state
-
-def context_extractor_node(state: TripPlannerState):
-    return state
-
-_GRAPH_CACHE = None
+Return just the place name or "unclear".
+"""
+            
+            try:
+                inferred = llm.invoke(prompt).content.strip().strip('"\'')
+                if inferred.lower() != 'unclear' and inferred in mentions:
+                    context['destination'] = inferred
+                    has_destination = True
+                    print(f"[DEBUG] Inferred destination: {inferred}")
+            except Exception:
+                pass
+        
+        if not has_destination:
+            # Ask them to specify destination
+            response = "Which destination would you like me to plan for? I can help you choose from the places we discussed or somewhere completely new!"
+            return {
+                'response': response,
+                'context': context,
+                'planning_stage': 'plan',
+                'missing_info': True
+            }
+        
+        # Ready to hand off to trip planner
+        return {
+            'response': '',  # Trip planner will handle the response
+            'context': context,
+            'planning_stage': 'plan',
+            'missing_info': False,
+            'ready_for_planning': True
+        }
+    
+    # Fallback
+    return {
+        'response': "I'm here to help you plan amazing trips! What kind of adventure are you thinking about?",
+        'context': context,
+        'planning_stage': 'chat',
+        'missing_info': False
+    }
 
 def build_conversation_graph():
-    global _GRAPH_CACHE
-    if _GRAPH_CACHE: return _GRAPH_CACHE
+    """Build the conversation graph with intelligent routing"""
     graph = StateGraph(ConversationAgentState)
+    
     graph.add_node('conversation', conversation_agent)
-    graph.add_node('planner_act', planner_act)
-    graph.add_node('planner_reflect', planner_reflect)
-    def router(state):
-        return 'planner_act' if state.get('plan') else END
-    graph.add_conditional_edges('conversation', router, {'planner_act':'planner_act', END: END})
-    def act_router(state):
-        if state.get('plan') and state.get('tool_cursor',0) < len(state.get('plan')):
-            return 'planner_act'
-        return 'planner_reflect'
-    graph.add_conditional_edges('planner_act', act_router, {'planner_act':'planner_act','planner_reflect':'planner_reflect'})
-    graph.add_edge('planner_reflect', END)
+    graph.add_node('trip_planner', trip_planner_node)
+    
+    def smart_router(state):
+        """Route based on user intent and readiness, not rigid slot checking"""
+        
+        # Only route to trip planner if user is explicitly ready to plan
+        # and has at least a destination
+        ready_for_planning = state.get('ready_for_planning', False)
+        has_destination = bool(state.get('context', {}).get('destination'))
+        
+        if ready_for_planning and has_destination:
+            return 'trip_planner'
+        else:
+            return END
+    
+    graph.add_conditional_edges(
+        'conversation', 
+        smart_router, 
+        {'trip_planner': 'trip_planner', END: END}
+    )
+    
+    graph.add_edge('trip_planner', END)
     graph.set_entry_point('conversation')
-    memory = MemorySaver(); app = graph.compile(checkpointer=memory)
-    _GRAPH_CACHE = app
-    return app
+    
+    memory = MemorySaver()
+    return graph.compile(checkpointer=memory)
+
+# Cache the graph
+_GRAPH_CACHE = None
 
 def run_conversation_graph(user_input, chat_history, context=None):
+    """Run the conversation with the new intelligent routing"""
+    global _GRAPH_CACHE
+    
+    if _GRAPH_CACHE is None:
+        _GRAPH_CACHE = build_conversation_graph()
+    
     context = context or {}
-    state: ConversationAgentState = {'user_input': user_input,'chat_history': chat_history,'context': context}
-    app = build_conversation_graph()
-    return app.invoke(state)
-
-    def _next_missing_slot(context: Dict[str,Any]) -> str|None:
-        for slot in SLOT_ORDER:
-            if slot == 'start_date' and context.get('committed_start_date'):
-                continue
-            if not context.get(slot):
-                return slot
-        return None
-
-    def conversation_agent(state: ConversationAgentState):
-        chat_history = state.get('chat_history', []) or []
-        user_input = state.get('user_input', '')
-        context = state.get('context', {}) or {}
-        history_str = _history_to_text(chat_history)
-        intent = _classify_intent(user_input, history_str)
-        state['planning_stage'] = 'plan' if intent == 'PLAN' else ('explore' if intent == 'EXPLORE' else 'smalltalk')
-        extracted = _extract_slots(user_input, context)
-        for k,v in extracted.items():
-            if k not in context or not context.get(k):
-                context[k] = v
-        if context.get('start_date') and re.match(r'^20\d{2}-\d{2}-\d{2}$', str(context['start_date'])):
-            context['committed_start_date'] = context['start_date']
-        if context.get('proposed_start_date') and any(t in user_input.lower() for t in ['use that','sounds good','ok','okay','yes','let\'s go with','works']):
-            if not context.get('committed_start_date'):
-                context['committed_start_date'] = context['proposed_start_date']
-                context.pop('start_date', None)
-        missing_slot = _next_missing_slot(context)
-        if state['planning_stage'] == 'smalltalk':
-            state['response'] = "Hi! Tell me about the kind of trip you're thinking about or ask for ideas." if not user_input.strip() else "Share any trip ideas or ask for destination suggestions when ready."
-            state['context'] = context
-            return state
-        if state['planning_stage'] == 'explore':
-            dest_tool = get_destination_tool()
-            prefs = user_input if user_input.strip() else "beach, culture, moderate budget"
-            try:
-                suggestions = dest_tool.run(prefs)
-            except Exception:
-                suggestions = "Here are a few diverse destinations you might enjoy."
-            follow = "Pick one destination to move into planning." if not context.get('destination') else f"Great, we can start planning for {context['destination']}. Provide a month or date to begin."
-            state['response'] = suggestions + "\n\n" + follow
-            state['context'] = context
-            return state
-        if missing_slot:
-            prompts = {
-                'user_city': "What city will you depart from?",
-                'destination': "Where do you want to go? You can also ask for ideas first.",
-                'start_date': "What is your start date? Give YYYY-MM-DD or just a month name.",
-                'duration_days': "How many days should the trip last?",
-                'number_of_travelers': "How many travelers are going?"
-            }
-            if missing_slot == 'start_date' and context.get('proposed_start_date'):
-                state['response'] = f"We could start around {context['proposed_start_date']}. Say 'use that' to accept or give another date."
-            else:
-                state['response'] = prompts.get(missing_slot, f"Provide {missing_slot} please.")
-            state['missing_info'] = True
-            state['context'] = context
-            return state
-        state['missing_info'] = False
+    state: ConversationAgentState = {
+        'user_input': user_input,
+        'chat_history': chat_history,
+        'context': context
+    }
+    
+    # Get or create thread ID
+    thread_id = context.get('_thread_id')
+    if not thread_id:
+        thread_id = 'default'
+        context['_thread_id'] = thread_id
         state['context'] = context
-        return trip_planner_node(state)
-
-    def context_extractor_node(state: TripPlannerState):
-        return state
-
-    _GRAPH_CACHE = None
-
-    def build_conversation_graph():
-        global _GRAPH_CACHE
-        if _GRAPH_CACHE:
-            return _GRAPH_CACHE
-        graph = StateGraph(ConversationAgentState)
-        graph.add_node('conversation', conversation_agent)
-        graph.add_edge('conversation', END)
-        graph.set_entry_point('conversation')
-        memory = MemorySaver()
-        app = graph.compile(checkpointer=memory)
-        _GRAPH_CACHE = app
-        return app
-
-    def run_conversation_graph(user_input, chat_history, context=None):
-        context = context or {}
-        state: ConversationAgentState = {
-            'user_input': user_input,
-            'chat_history': chat_history,
-            'context': context
-        }
-        app = build_conversation_graph()
-        result = app.invoke(state)
-        return result
+    
+    result = _GRAPH_CACHE.invoke(state, config={'configurable': {'thread_id': thread_id}})
+    return result
