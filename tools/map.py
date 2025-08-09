@@ -1,11 +1,13 @@
 from langchain.tools import Tool
 from os import environ
 from requests import get, RequestException
+from functools import lru_cache
 
 
 GEOAPIFY_API_KEY = environ.get("GEOAPIFY_API_KEY")
 
 
+@lru_cache(maxsize=64)
 def _geocode_place(query: str):
     if not GEOAPIFY_API_KEY:
         return None

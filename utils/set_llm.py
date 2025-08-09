@@ -3,17 +3,20 @@ from os import environ
 from utils.config import LLM_MODEL, LLM_TEMPERATURE
 
 
-_llm_instance = None
+_LLM_CACHE = {}
 
 
-def get_llm():
-    global _llm_instance
-
-    if _llm_instance is None:
-        _llm_instance = ChatTogether(
+def get_llm(*, model: str | None = None, temperature: float | None = None):
+    """Return a cached LLM client. Allows per-call overrides for model/temperature.
+    Cache keyed by (model, temperature) to avoid rebuilding for each call.
+    """
+    m = model or LLM_MODEL
+    t = LLM_TEMPERATURE if temperature is None else temperature
+    key = (m, float(t))
+    if key not in _LLM_CACHE:
+        _LLM_CACHE[key] = ChatTogether(
             api_key=environ.get("API_KEY"),
-            temperature=LLM_TEMPERATURE,
-            model=LLM_MODEL
+            temperature=t,
+            model=m,
         )
-
-    return _llm_instance
+    return _LLM_CACHE[key]
