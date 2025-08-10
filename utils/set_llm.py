@@ -13,10 +13,12 @@ def get_llm(*, model: str | None = None, temperature: float | None = None):
     m = model or LLM_MODEL
     t = LLM_TEMPERATURE if temperature is None else temperature
     key = (m, float(t))
+
     if key not in _LLM_CACHE:
         _LLM_CACHE[key] = ChatTogether(
             api_key=environ.get("API_KEY"),
             temperature=t,
             model=m,
         )
+
     return _LLM_CACHE[key]

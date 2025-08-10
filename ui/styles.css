@@ -1,0 +1,421 @@
+/* Clean, simple page layout */
+html, body { 
+    height: 100%; 
+    margin: 0;
+    padding: 0;
+}
+
+.gradio-container { 
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+}
+
+/* Prevent any horizontal overflow */
+* {
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+}
+
+.footer {display: none !important;}
+.gradio-container .footer {display: none !important;}
+footer {display: none !important;}
+
+/* Hide Gradio processing indicators */
+/* Hide processing text completely */
+.eta-bar,
+.progress-text,
+.gradio-container .eta-bar,
+.gradio-container .progress-text,
+[class*="eta"],
+[class*="progress-text"],
+.gr-form .eta-bar,
+.gr-form .progress-text {
+    display: none !important;
+    visibility: hidden !important;
+}
+
+/* Hide processing spinner in chat area only */
+#main-chatbot .spinner,
+#main-chatbot .loading,
+#main-chatbot [class*="spinner"],
+#main-chatbot [class*="loading"],
+.gradio-chatbot .spinner,
+.gradio-chatbot .loading,
+.gradio-chatbot [class*="spinner"],
+.gradio-chatbot [class*="loading"],
+.chatbot .spinner,
+.chatbot .loading,
+.chatbot [class*="spinner"],
+.chatbot [class*="loading"] {
+    display: none !important;
+    visibility: hidden !important;
+}
+
+/* Keep spinner in textbox area (don't hide textbox spinners) */
+/* This is achieved by NOT targeting textbox-related selectors */
+
+/* Limit transitions for stability */
+#main-chatbot *,
+.gradio-chatbot * {
+    transition: none !important;
+}
+
+/* Hide chatbot clear/delete buttons */
+.chatbot .clear-button,
+.chatbot .copy-button,
+.gradio-chatbot .clear-button,
+.gradio-chatbot .copy-button,
+button[title="Clear"],
+button[aria-label="Clear"],
+.chatbot-header button,
+.chatbot-controls button,
+.chatbot button[aria-label*="clear"],
+.chatbot button[aria-label*="Clear"],
+.chatbot button[aria-label*="delete"],
+.chatbot button[aria-label*="Delete"],
+.gradio-chatbot button[aria-label*="clear"],
+.gradio-chatbot button[aria-label*="Clear"],
+.gradio-chatbot button[aria-label*="delete"],
+.gradio-chatbot button[aria-label*="Delete"],
+.gradio-chatbot .icon-button,
+.chatbot .icon-button {
+    display: none !important;
+    visibility: hidden !important;
+}
+
+/* Thinking indicator */
+.thinking-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: #8e8ea0;
+    font-style: italic;
+}
+
+.thinking-dots {
+    display: inline-flex;
+    gap: 2px;
+}
+
+.thinking-dots span {
+    width: 4px;
+    height: 4px;
+    background-color: #8e8ea0;
+    border-radius: 50%;
+}
+
+/* Hide the default message label */
+.input-container label {
+    display: none !important;
+}
+
+/* Target the specific chatbot and make it seamless */
+#main-chatbot,
+#main-chatbot .gradio-chatbot,
+.gradio-chatbot,
+.chatbot {
+    background: transparent !important;
+    background-color: transparent !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    max-width: 900px !important;
+    margin: 0 auto !important;
+    padding-top: 20px !important;
+}
+
+/* Remove all possible container styling */
+#main-chatbot *,
+.gradio-chatbot *,
+.chatbot * {
+    background: transparent !important;
+    background-color: transparent !important;
+}
+
+/* Remove any remaining borders or backgrounds */
+[data-testid="chatbot"],
+[class*="chatbot"],
+[class*="gradio-chatbot"] {
+    background: transparent !important;
+    background-color: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+/* Remove borders from all messages */
+#main-chatbot .message,
+#main-chatbot .user,
+#main-chatbot .bot,
+#main-chatbot .assistant,
+.gradio-chatbot .message,
+.gradio-chatbot .user,
+.gradio-chatbot .bot,
+.gradio-chatbot .assistant,
+.chatbot .message,
+.chatbot .user,
+.chatbot .bot,
+.chatbot .assistant {
+    border: none !important;
+    box-shadow: none !important;
+}
+
+/* Style user messages with distinct background */
+#main-chatbot .user,
+#main-chatbot .user > div,
+.gradio-chatbot .user,
+.gradio-chatbot .user > div,
+.chatbot .user,
+.chatbot .user > div,
+.message[data-role="user"],
+.message.user {
+    background: #2f2f2f !important;
+    background-color: #2f2f2f !important;
+    border-radius: 12px !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+/* Style agent messages with transparent background */
+#main-chatbot .bot,
+#main-chatbot .bot > div,
+#main-chatbot .assistant,
+#main-chatbot .assistant > div,
+.gradio-chatbot .bot,
+.gradio-chatbot .bot > div,
+.gradio-chatbot .assistant,
+.gradio-chatbot .assistant > div,
+.chatbot .bot,
+.chatbot .bot > div,
+.chatbot .assistant,
+.chatbot .assistant > div,
+.message[data-role="assistant"],
+.message.assistant,
+.message.bot {
+    background: transparent !important;
+    background-color: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+/* Hide scrollbars for a cleaner look */
+#main-chatbot,
+#main-chatbot *,
+.gradio-chatbot,
+.gradio-chatbot *,
+.chatbot,
+.chatbot * { 
+    scrollbar-width: none !important; 
+    -ms-overflow-style: none !important; 
+}
+
+#main-chatbot::-webkit-scrollbar,
+#main-chatbot *::-webkit-scrollbar,
+.gradio-chatbot::-webkit-scrollbar,
+.gradio-chatbot *::-webkit-scrollbar,
+.chatbot::-webkit-scrollbar,
+.chatbot *::-webkit-scrollbar { 
+    display: none !important; 
+    width: 0 !important; 
+    height: 0 !important; 
+}
+
+/* Modern ChatGPT-like input styling */
+.message-input-container {
+    max-width: 100% !important;
+    margin: 0 auto !important;
+    padding: 20px !important;
+}
+
+/* Main container - this is the parent textbox that should get the styling */
+.message-input-wrapper {
+    position: relative !important;
+    width: 100% !important;
+    max-width: 800px !important;
+    margin: 0 auto !important;
+    background: #2f2f2f !important;
+    border: 1px solid #565869 !important;
+    border-radius: 24px !important;
+    padding: 12px 50px 12px 16px !important;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.05) !important;
+}
+
+/* Focus state on the parent container */
+.message-input-wrapper:focus-within {
+    border-color: #10a37f !important;
+    box-shadow: 0 0 0 2px rgba(16, 163, 127, 0.2) !important;
+}
+
+/* Remove all styling from the inner textbox */
+.message-input-wrapper input, 
+.message-input-wrapper textarea {
+    background: transparent !important;
+    border: none !important;
+    outline: none !important;
+    color: #ececf1 !important;
+    font-size: 16px !important;
+    line-height: 24px !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+    resize: none !important;
+    min-height: 24px !important;
+    max-height: 200px !important;
+    box-shadow: none !important;
+}
+
+/* Remove any default gradio styling from inner textbox */
+.message-input-wrapper .gradio-textbox,
+.message-input-wrapper .gradio-textbox > label,
+.message-input-wrapper .gradio-textbox > label > div,
+.message-input-wrapper .gradio-textbox .wrap,
+.message-input-wrapper .gradio-textbox input,
+.message-input-wrapper .gradio-textbox textarea {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+}
+
+/* Force remove all borders and backgrounds from inner elements */
+.message-input-wrapper * {
+    border: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+
+/* But keep the parent container styling */
+.message-input-wrapper {
+    background: #2f2f2f !important;
+    border: 1px solid #565869 !important;
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.05) !important;
+}
+
+.message-input-wrapper input::placeholder,
+.message-input-wrapper textarea::placeholder {
+    color: #8e8ea0 !important;
+}
+
+/* Send button embedded in the container */
+.send-button {
+    position: absolute !important;
+    right: 8px !important;
+    top: 50% !important;
+    transform: translateY(-50%) !important;
+    background: #10a37f !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 50% !important;
+    width: 32px !important;
+    height: 32px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    cursor: pointer !important;
+    font-size: 14px !important;
+    font-weight: bold !important;
+    z-index: 10 !important;
+    min-width: 32px !important;
+    padding: 0 !important;
+}
+
+.send-button:hover {
+    background: #0d8d6a !important;
+}
+
+.send-button:disabled {
+    background: #565869 !important;
+    cursor: not-allowed !important;
+}
+
+/* Normal row styling */
+.message-row {
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+/* Welcome area styling - very compact */
+.welcome-container {
+    display: flex !important;
+    flex-direction: column !important;
+    align-items: center !important;
+    justify-content: center !important;
+    min-height: 150px !important;
+    text-align: center !important;
+    padding: 15px !important;
+    opacity: 1 !important;
+    overflow: hidden !important;
+}
+
+/* Immediate hide when fade-out class is applied */
+.welcome-container.fade-out {
+    opacity: 0 !important;
+    min-height: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+}
+
+/* Ensure welcome area component doesn't take space when hidden */
+#welcome-area.hidden {
+    display: none !important;
+    height: 0 !important;
+    min-height: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    opacity: 0 !important;
+}
+
+/* Modern ChatGPT-like input styling */
+.message-input-container {
+    max-width: 100% !important;
+    margin: 0 auto !important;
+    padding: 10px !important;
+}
+
+/* Chatbot - simple styling with minimal padding */
+#main-chatbot {
+    background: transparent !important;
+    border: none !important;
+    max-width: 900px !important;
+    margin: 0 auto !important;
+    padding: 10px !important;
+}
+
+/* Prefer small viewport units when supported */
+@supports (height: 100svh) {
+    .welcome-container { min-height: calc(100svh - 160px) !important; }
+    #main-chatbot { min-height: calc(100svh - 160px) !important; }
+}
+
+.welcome-content {
+    max-width: 600px !important;
+    margin: 0 auto !important;
+}
+
+.welcome-title {
+    font-size: 48px !important;
+    font-weight: 600 !important;
+    margin: 0 0 16px 0 !important;
+    color: #ececf1 !important;
+    background: transparent !important;
+}
+
+.welcome-subtitle {
+    font-size: 20px !important;
+    color: #8e8ea0 !important;
+    margin: 0 !important;
+    line-height: 1.5 !important;
+    background: transparent !important;
+}
+
+/* Chat area scrolls internally and hides scrollbar for a clean look */
+#main-chatbot { 
+    overflow: auto !important; 
+    scrollbar-width: none !important; 
+}
+
+#main-chatbot::-webkit-scrollbar { 
+    display: none !important; 
+    width: 0 !important; 
+    height: 0 !important; 
+}
