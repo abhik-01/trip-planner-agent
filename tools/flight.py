@@ -2,6 +2,8 @@ from amadeus import Client, ResponseError
 from langchain.tools import Tool
 from os import environ
 from tools.currency import convert_amount
+from utils.set_llm import get_llm
+from prompts import format_prompt, PromptType
 
 
 AMADEUS_CLIENT_ID = environ.get("AMADEUS_CLIENT_ID")
@@ -13,51 +15,73 @@ _amadeus_client = None
 _airport_cache = {}
 
 
+def _resolve_location_intelligently(location: str) -> str:
+    """Use LLM to resolve ambiguous locations to major cities with airports"""
+    llm = get_llm(temperature=0.2)
+    
+    prompt = format_prompt(
+        PromptType.FLIGHT_LOCATION_RESOLUTION,
+        location=location
+    )
+
+    try:
+        response = llm.invoke(prompt)
+        resolved = response.content.strip().strip('"').strip()
+        if resolved and resolved.lower() != location.lower():
+            return resolved
+        return location
+    except Exception:
+        return location
+
+
 def _get_client():
     global _amadeus_client
     if _amadeus_client is None:
         if not (AMADEUS_CLIENT_ID and AMADEUS_CLIENT_SECRET):
-            print("[WARN] Amadeus credentials missing; flight search disabled.")
             return None
         try:
             _amadeus_client = Client(
                 client_id=AMADEUS_CLIENT_ID,
                 client_secret=AMADEUS_CLIENT_SECRET
             )
-        except Exception as e:
-            print(f"[ERROR] Could not initialize Amadeus client: {e}")
+        except Exception:
             _amadeus_client = None
+
     return _amadeus_client
 
 
 def get_nearest_airport(city: str) -> str:
-    print(f"[API CALL] Amadeus: get_nearest_airport(city={city})")
     """
     Uses Amadeus API to find the nearest airport IATA code for a given city.
-    Uses caching to avoid repeated API calls for the same city.
+    Uses LLM to intelligently resolve ambiguous locations first.
     """
     # Check cache first
     city_lower = city.lower().strip()
     if city_lower in _airport_cache:
-        print(f"[CACHE HIT] Using cached airport code for {city}")
         return _airport_cache[city_lower]
+    
+    # Use LLM to resolve the location intelligently
+    resolved_city = _resolve_location_intelligently(city)
+    resolved_lower = resolved_city.lower().strip()
+    
+    # Check cache for resolved city
+    if resolved_lower in _airport_cache:
+        return _airport_cache[resolved_lower]
     
     # Try API lookup
     client = _get_client()
     if client is None:
-        print(f"[ERROR] No Amadeus client available for airport lookup: {city}")
-        return None
-        
+        return
+
     try:
         # Try multiple search strategies for better coverage
-        search_terms = [city, f"{city} airport", f"{city} city"]
+        search_terms = [resolved_city, f"{resolved_city} airport", city, f"{city} airport"]
         
         for search_term in search_terms:
             try:
                 response = client.reference_data.locations.get(
                     keyword=search_term,
-                    subType='AIRPORT',
-                    page_limit=3  # Get top 3 results
+                    subType='AIRPORT'
                 )
                 data = response.data
 
@@ -65,35 +89,38 @@ def get_nearest_airport(city: str) -> str:
                     # Find the best match (preferably with matching city name)
                     for airport in data:
                         airport_city = airport.get('address', {}).get('cityName', '').lower()
-                        if city_lower in airport_city or airport_city in city_lower:
+                        if (resolved_lower in airport_city or airport_city in resolved_lower or 
+                            city_lower in airport_city or airport_city in city_lower):
                             iata_code = airport['iataCode']
+                            # Cache both original and resolved city
                             _airport_cache[city_lower] = iata_code
-                            print(f"[SUCCESS] Found airport {iata_code} for {city}")
+                            _airport_cache[resolved_lower] = iata_code
+
                             return iata_code
                     
                     # If no perfect match, use the first result
                     iata_code = data[0]['iataCode']
                     _airport_cache[city_lower] = iata_code
-                    print(f"[SUCCESS] Found nearest airport {iata_code} for {city}")
+                    _airport_cache[resolved_lower] = iata_code
+
                     return iata_code
                     
             except ResponseError as e:
-                print(f"[DEBUG] Search term '{search_term}' failed: {e}")
                 continue
                 
         # Cache negative result to avoid repeated failures
         _airport_cache[city_lower] = None
-        print(f"[ERROR] No airport found for {city} after trying multiple search terms")
-        return None
-        
-    except Exception as e:
-        print(f"[ERROR] Unexpected error in airport lookup for {city}: {e}")
+        _airport_cache[resolved_lower] = None
+
+        return
+
+    except Exception:
         _airport_cache[city_lower] = None
-        return None
+
+        return
 
 
 def search_flights_from_city(user_city: str, destination_city: str, date: str, adults: int) -> str:
-    print(f"[API CALL] Amadeus: search_flights_from_city(user_city={user_city}, destination_city={destination_city}, date={date}, adults={adults})")
     """
     Finds flights from the nearest airport to the user's city to the destination city.
     Returns a list of flight dicts (price, currency, airline, dep/arr airports, dep_time, etc.).
@@ -112,16 +139,12 @@ def search_flights_from_city(user_city: str, destination_city: str, date: str, a
     dest_code = get_nearest_airport(destination_city)
 
     if not origin_code:
-        return [{
-            "error": f"Could not find an airport for '{user_city}'. Please try with a nearby major city name or provide the airport code directly (e.g., 'Mumbai' or 'BOM')."
-        }]
+        error_msg = _generate_intelligent_error_message(user_city, is_origin=True)
+        return [{"error": error_msg}]
 
     if not dest_code:
-        return [{
-            "error": f"Could not find an airport for '{destination_city}'. Please try with a major city name or provide the airport code directly."
-        }]
-
-    print(f"[INFO] Using airports: {user_city} -> {origin_code}, {destination_city} -> {dest_code}")
+        error_msg = _generate_intelligent_error_message(destination_city, is_origin=False)
+        return [{"error": error_msg}]
 
     try:
         # Add some flight search options for better results
@@ -163,13 +186,11 @@ def search_flights_from_city(user_city: str, destination_city: str, date: str, a
                         "duration": offer['itineraries'][0].get('duration', 'N/A')
                     })
                 except (KeyError, ValueError, TypeError) as e:
-                    print(f"[WARN] Skipping malformed flight offer: {e}")
                     continue
                     
             if results:
                 # Sort by price (cheapest first)
                 results.sort(key=lambda x: x['price'])
-                print(f"[SUCCESS] Found {len(results)} flights from {origin_code} to {dest_code}")
                 return results
             else:
                 return [{"error": "Found flights but could not parse pricing information."}]
@@ -179,11 +200,28 @@ def search_flights_from_city(user_city: str, destination_city: str, date: str, a
             }]
 
     except ResponseError as e:
-        print(f"[ERROR] Amadeus API error: {e}")
         return [{"error": f"Flight search failed: {str(e)}. Please try again or check your travel details."}]
-    except Exception as e:
-        print(f"[ERROR] Unexpected error in flight search: {e}")
-        return [{"error": f"Unexpected error during flight search: {str(e)}"}]
+    except Exception:
+        return [{"error": "Unexpected error during flight search."}]
+
+
+def _generate_intelligent_error_message(location: str, is_origin: bool = True) -> str:
+    """Generate helpful error messages with LLM suggestions"""
+    llm = get_llm(temperature=0.3)
+    
+    location_type = "departure city" if is_origin else "destination"
+    
+    prompt = format_prompt(
+        PromptType.FLIGHT_ERROR_MESSAGE,
+        location=location,
+        location_type=location_type
+    )
+
+    try:
+        response = llm.invoke(prompt)
+        return response.content.strip()
+    except Exception:
+        return f"I couldn't find an airport for '{location}'. Could you try a nearby major city or provide the airport code directly (like 'DEL' for Delhi)?"
 
 
 def get_flight_tool() -> Tool:

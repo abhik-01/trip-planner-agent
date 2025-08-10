@@ -13,6 +13,7 @@ def _geocode_place(query: str):
         return None
     url = "https://api.geoapify.com/v1/geocode/search"
     params = {"text": query, "limit": 1, "apiKey": GEOAPIFY_API_KEY}
+
     try:
         r = get(url, params=params, timeout=10)
         r.raise_for_status()
@@ -21,13 +22,11 @@ def _geocode_place(query: str):
         if feats:
             props = feats[0]['properties']
             return props.get('lon'), props.get('lat')
-    except Exception as e:
-        print(f"[WARN] geocode failed: {e}")
-    return None
+    except Exception:
+        return None
 
 
 def find_nearby_places(location: str, category: str = "tourism") -> str:
-    print(f"[API CALL] Geoapify: find_nearby_places(location={location}, category={category})")
     if not location or not isinstance(location, str):
         return "Please provide a valid location."
     if not GEOAPIFY_API_KEY:

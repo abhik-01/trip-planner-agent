@@ -1,91 +1,77 @@
-from __future__ import annotations
-
-from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
-from typing import Dict, Any, List
-import re
-from datetime import date
-from concurrent.futures import ThreadPoolExecutor
-import time
-
-from tools.destination import get_destination_tool
-from classTypes.class_types import TripPlannerState
 from agents.trip_planner_agent import trip_planner_node
+from classTypes.class_types import TripPlannerState
+from concurrent.futures import ThreadPoolExecutor
+from json import loads
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import StateGraph, END
+from prompts import format_prompt, PromptType
+from re import search, DOTALL
+from typing import Dict, Any, List
+from tools.destination import get_destination_tool
+from utils.intelligent_intent import IntelligentIntentClassifier, SemanticQueryClassifier
 from utils.set_llm import get_llm
+from utils.safety import (
+    screen_user_input_safety, 
+    validate_response_safety, 
+    get_safety_refusal_response
+)
+
 
 ConversationAgentState = TripPlannerState
 
+
 def _classify_user_intent(user_input: str, chat_history: List[Dict[str,str]]) -> Dict[str, Any]:
-    """Use LLM to understand what the user actually wants"""
-    llm = get_llm(temperature=0.3)
-    
-    # Build recent context
-    recent_context = ""
-    for msg in chat_history[-6:]:
-        if isinstance(msg, dict):
-            role = msg.get('role', 'unknown')
-            content = msg.get('content', '')
-            recent_context += f"{role}: {content}\n"
-    
-    prompt = f"""Analyze the user's intent and classify their request:
-
-Recent conversation:
-{recent_context}
-
-Current user message: "{user_input}"
-
-Determine:
-1. Intent: "explore" (asking for suggestions, browsing options) OR "plan" (ready to book/plan specific trip) OR "chat" (general conversation)
-2. If exploring, what are they exploring? (destinations, activities, etc.)
-3. If planning, what specific destination/details do they have?
-4. Are they asking for suggestions or ready to commit to planning?
-
-Return JSON with: {{"intent": "explore|plan|chat", "exploring": "string or null", "planning_destination": "string or null", "ready_to_plan": true/false}}
-"""
-    
-    try:
-        response = llm.invoke(prompt).content.strip()
-        # Extract JSON from response
-        import json
-        json_match = re.search(r'\{.*\}', response, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group())
-    except Exception as e:
-        print(f"Intent classification failed: {e}")
-    
-    # Fallback heuristics
-    lower_input = user_input.lower()
-    if any(word in lower_input for word in ['suggest', 'recommend', 'ideas', 'where', 'places', 'destinations']):
-        return {"intent": "explore", "exploring": "destinations", "planning_destination": None, "ready_to_plan": False}
-    elif any(word in lower_input for word in ['plan', 'book', 'itinerary', 'lets go', "let's go"]):
-        return {"intent": "plan", "exploring": None, "planning_destination": None, "ready_to_plan": True}
-    elif any(word in lower_input for word in [
-        'flight', 'price', 'cost', 'fare', 'ticket', 'how much',  # flights
-        'weather', 'temperature', 'rain', 'climate', 'forecast',  # weather
-        'activities', 'things to do', 'attractions', 'sightseeing',  # activities
-        'nearby', 'around', 'close to', 'near', 'vicinity',  # nearby places
-        'budget', 'expense', 'money', 'spend'  # budget
-    ]):
-        # All trip-specific questions should be handled as chat to reference previous data
-        return {"intent": "chat", "exploring": None, "planning_destination": None, "ready_to_plan": False}
-    else:
-        return {"intent": "chat", "exploring": None, "planning_destination": None, "ready_to_plan": False}
+    """Use intelligent LLM-based intent classification instead of hardcoded keywords"""
+    return IntelligentIntentClassifier.classify_intent(user_input, chat_history)
 
 def _handle_exploration(user_input: str, intent_data: Dict[str, Any], context: Dict[str, Any]) -> str:
     """Handle exploration requests - suggestions, browsing, etc. with async optimization"""
     
-    exploring = intent_data.get('exploring', '').lower()
+    exploring = (intent_data.get('exploring') or '').lower()
     
     if 'destination' in exploring or 'places' in exploring or not exploring:
         # Use destination suggestion tool with parallel LLM processing
         try:
             def get_suggestions():
                 dest_tool = get_destination_tool()
-                return dest_tool.func(user_input)
+                
+                # Enhanced input with context awareness
+                enhanced_input = user_input
+                
+                # Add context from recent conversation if this is a follow-up request
+                is_followup = context.get('_is_followup_request', False)
+                if is_followup:
+                    # Use available context info
+                    recent_context = context.get('_chat_context', '')
+                    geographic_context = context.get('_geographic_context', [])
+                    temporal_context = context.get('_temporal_context', [])
+                    geographic_constraints = context.get('_geographic_constraints', [])
+                    follow_up_context = context.get('_follow_up_context', '')
+                    
+                    # Build comprehensive context with priority on geographic constraints
+                    context_parts = []
+                    if geographic_constraints:
+                        context_parts.append(f"GEOGRAPHIC CONSTRAINT: {', '.join(geographic_constraints[:3])}")
+                    if recent_context:
+                        context_parts.append(recent_context[:200])
+                    if geographic_context:
+                        context_parts.append(f"Geographic focus: {', '.join(geographic_context[:3])}")
+                    if temporal_context:
+                        context_parts.append(f"Time context: {', '.join(temporal_context[:2])}")
+                    if follow_up_context:
+                        context_parts.append(follow_up_context)
+                    
+                    if context_parts:
+                        enhanced_input = f"{' '.join(context_parts)} - User request: {user_input}"
+                
+                return dest_tool.func(enhanced_input)
             
             def get_context_response():
                 llm = get_llm()
-                prompt = f"""Based on the user's request "{user_input}", create a brief, enthusiastic introduction for destination suggestions. Keep it to 1-2 sentences."""
+                prompt = format_prompt(
+                    PromptType.EXPLORATION_INTRO,
+                    user_input=user_input
+                )
                 return llm.invoke(prompt).content.strip()
             
             # Run both operations in parallel
@@ -107,15 +93,14 @@ def _handle_exploration(user_input: str, intent_data: Dict[str, Any], context: D
             return response
             
         except Exception as e:
-            print(f"[DEBUG] Exploration tool failed: {e}")
             return "I'd love to suggest some amazing destinations! Could you tell me what kind of experience you're looking for?"
     
     # For other types of exploration, use LLM
     llm = get_llm()
-    prompt = f"""The user is exploring travel options: "{user_input}"
-
-Provide helpful, enthusiastic suggestions. Be conversational and engaging. End with a question to keep the conversation flowing.
-"""
+    prompt = format_prompt(
+        PromptType.EXPLORATION_GENERAL,
+        user_input=user_input
+    )
     
     try:
         return llm.invoke(prompt).content.strip()
@@ -123,7 +108,7 @@ Provide helpful, enthusiastic suggestions. Be conversational and engaging. End w
         return "That sounds exciting! What kind of travel experience are you looking for?"
 
 def _handle_general_chat(user_input: str, context: Dict[str, Any]) -> str:
-    """Handle general conversation, greetings, and specific questions about previous plans"""
+    """Handle general conversation, greetings, and any non-travel topics intelligently"""
     
     # Check if user is asking about specific aspects of their previous trip planning
     if _is_trip_specific_inquiry(user_input, context):
@@ -131,73 +116,57 @@ def _handle_general_chat(user_input: str, context: Dict[str, Any]) -> str:
     
     llm = get_llm()
     
-    prompt = f"""You are a friendly travel planning assistant. The user said: "{user_input}"
-
-Respond naturally and conversationally. If it's a greeting, greet back warmly. If they seem interested in travel, gently guide toward travel planning. Keep it brief and friendly.
-"""
+    # Enhanced prompt to handle any topic and naturally steer to travel
+    prompt = format_prompt(
+        PromptType.GENERAL_CHAT,
+        user_input=user_input
+    )
     
     try:
         return llm.invoke(prompt).content.strip()
     except Exception:
-        return "Hello! I'm here to help you plan amazing trips. What kind of adventure are you thinking about?"
+        return "Hello! I'm your travel planning assistant. I'm here to help you discover amazing destinations and plan unforgettable trips. What kind of adventure interests you?"
 
 
 def _is_trip_specific_inquiry(user_input: str, context: Dict[str, Any]) -> bool:
-    """Check if the user is asking about specific aspects of their previous trip"""
+    """Use semantic classification to detect trip-specific inquiries"""
     
     # Must have previous trip data to answer specific questions
     if not context.get('last_trip_data') or not context.get('tool_results'):
         return False
     
-    inquiry_keywords = {
-        'weather': ['weather', 'temperature', 'rain', 'climate', 'forecast'],
-        'activities': ['activities', 'things to do', 'attractions', 'places to visit', 'sightseeing'],
-        'nearby': ['nearby', 'around', 'close to', 'near', 'vicinity', 'surroundings'],
-        'budget': ['budget', 'cost', 'expense', 'price', 'money', 'spend'],
-        'flights': ['flight', 'plane', 'airline', 'airport', 'fly'],
-        'accommodation': ['hotel', 'stay', 'accommodation', 'lodging'],
-        'food': ['food', 'restaurant', 'eat', 'cuisine', 'dining']
-    }
+    # Use semantic classifier to determine if this is a travel-related query
+    query_type = SemanticQueryClassifier.classify_travel_query(user_input, context.get('last_trip_data', {}))
     
-    user_lower = user_input.lower()
-    for category, keywords in inquiry_keywords.items():
-        if any(keyword in user_lower for keyword in keywords):
-            return True
-    
-    return False
+    # Any specific travel query type (not 'general') indicates trip-specific inquiry
+    return query_type != 'general'
 
 
 def _handle_trip_specific_inquiry(user_input: str, context: Dict[str, Any]) -> str:
-    """Handle specific questions about different aspects of the planned trip"""
+    """Handle specific questions about different aspects of the planned trip using semantic classification"""
     
     last_trip_data = context.get('last_trip_data', {})
     tool_results = context.get('tool_results', {})
-    destination = last_trip_data.get('destination', 'your destination')
+
+    # Use semantic classifier to determine the specific type of travel query
+    query_type = SemanticQueryClassifier.classify_travel_query(user_input, last_trip_data)
     
-    user_lower = user_input.lower()
-    
-    # Weather inquiries
-    if any(keyword in user_lower for keyword in ['weather', 'temperature', 'rain', 'climate', 'forecast']):
+    # Route to appropriate handler based on semantic classification
+    if query_type == 'weather':
         return _handle_weather_inquiry(user_input, last_trip_data, tool_results)
-    
-    # Activity inquiries  
-    elif any(keyword in user_lower for keyword in ['activities', 'things to do', 'attractions', 'places to visit', 'sightseeing']):
+    elif query_type == 'activities':
         return _handle_activity_inquiry(user_input, last_trip_data, tool_results)
-    
-    # Nearby places inquiries
-    elif any(keyword in user_lower for keyword in ['nearby', 'around', 'close to', 'near', 'vicinity', 'surroundings']):
+    elif query_type == 'nearby':
         return _handle_nearby_inquiry(user_input, last_trip_data, tool_results)
-    
-    # Budget inquiries
-    elif any(keyword in user_lower for keyword in ['budget', 'cost', 'expense', 'money', 'spend']):
+    elif query_type == 'budget':
         return _handle_budget_inquiry(user_input, last_trip_data, tool_results)
-    
-    # Flight inquiries (existing function)
-    elif any(keyword in user_lower for keyword in ['flight', 'plane', 'airline', 'airport', 'fly']):
+    elif query_type == 'flights':
         return _handle_flight_inquiry(user_input, context)
-    
-    # General trip summary
+    elif query_type in ['accommodation', 'food']:
+        # Handle accommodation and food queries with general trip inquiry for now
+        return _handle_general_trip_inquiry(user_input, last_trip_data, tool_results)
     else:
+        # For general queries or unclassified, use the general trip inquiry handler
         return _handle_general_trip_inquiry(user_input, last_trip_data, tool_results)
 
 
@@ -216,14 +185,13 @@ def _handle_weather_inquiry(user_input: str, trip_data: dict, tool_results: dict
     
     # Use LLM to generate natural response
     llm = get_llm()
-    prompt = f"""The user asked: "{user_input}"
-
-I have weather information for their {destination} trip:
-Travel date: {start_date or 'Not specified'}
-Weather data: {weather_data}
-
-Provide a natural, helpful response about the weather. Be conversational and include practical travel advice based on the weather conditions. Keep it concise but informative.
-"""
+    prompt = format_prompt(
+        PromptType.WEATHER_INQUIRY,
+        user_input=user_input,
+        destination=destination,
+        start_date=start_date or 'Not specified',
+        weather_data=weather_data
+    )
     
     try:
         response = llm.invoke(prompt)
@@ -244,13 +212,12 @@ def _handle_activity_inquiry(user_input: str, trip_data: dict, tool_results: dic
     
     # Use LLM to generate natural response
     llm = get_llm()
-    prompt = f"""The user asked: "{user_input}"
-
-I have activity suggestions for their {destination} trip:
-{activities_data}
-
-Provide a natural, enthusiastic response about these activities. Help them understand what makes each activity special and offer to provide more details about any specific activity they're interested in. Be conversational and helpful.
-"""
+    prompt = format_prompt(
+        PromptType.ACTIVITY_INQUIRY,
+        user_input=user_input,
+        destination=destination,
+        activities_data=activities_data
+    )
     
     try:
         response = llm.invoke(prompt)
@@ -274,13 +241,12 @@ def _handle_nearby_inquiry(user_input: str, trip_data: dict, tool_results: dict)
     
     # Use LLM to generate natural response
     llm = get_llm()
-    prompt = f"""The user asked: "{user_input}"
-
-I have information about nearby places around {destination}:
-{nearby_data}
-
-Provide a natural, informative response about these nearby places. Help them understand what's special about each location and how they might fit into their travel itinerary. Be enthusiastic and offer additional help.
-"""
+    prompt = format_prompt(
+        PromptType.NEARBY_INQUIRY,
+        user_input=user_input,
+        destination=destination,
+        nearby_data=nearby_data
+    )
     
     try:
         response = llm.invoke(prompt)
@@ -303,15 +269,14 @@ def _handle_budget_inquiry(user_input: str, trip_data: dict, tool_results: dict)
     
     # Use LLM to generate natural response
     llm = get_llm()
-    prompt = f"""The user asked: "{user_input}"
-
-I have budget information for their {destination} trip:
-Duration: {duration} days
-Travelers: {travelers}
-Budget breakdown: {budget_data}
-
-Provide a natural, helpful response about the trip budget. Explain the costs in a conversational way and offer suggestions for saving money or adjusting the budget if needed. Be practical and supportive.
-"""
+    prompt = format_prompt(
+        PromptType.BUDGET_INQUIRY,
+        user_input=user_input,
+        destination=destination,
+        duration=duration,
+        travelers=travelers,
+        budget_data=budget_data
+    )
     
     try:
         response = llm.invoke(prompt)
@@ -354,13 +319,11 @@ Available Information:
     if tool_results.get('budget'):
         trip_summary += "- Budget breakdown: Available\n"
     
-    prompt = f"""The user asked: "{user_input}"
-
-Here's their trip information:
-{trip_summary}
-
-Provide a natural, enthusiastic summary of their trip plan. Highlight the exciting aspects and offer to provide more details about any specific aspect they're interested in. Be conversational and helpful.
-"""
+    prompt = format_prompt(
+        PromptType.GENERAL_TRIP_INQUIRY,
+        user_input=user_input,
+        trip_summary=trip_summary
+    )
     
     try:
         response = llm.invoke(prompt)
@@ -429,13 +392,11 @@ Option {i}: {flight.get('airline', 'Unknown')}
 - Route: {flight.get('departure_airport', 'N/A')} → {flight.get('arrival_airport', 'N/A')}
 """
     
-    prompt = f"""The user asked: "{user_input}"
-
-I have flight information for their trip:
-{flight_summary}
-
-Provide a natural, helpful response about the flight options. Be conversational and highlight the key details like prices, airlines, and timing. Offer to provide more specific details if they're interested in any particular flight. Be enthusiastic but practical.
-"""
+    prompt = format_prompt(
+        PromptType.FLIGHT_INQUIRY,
+        user_input=user_input,
+        flight_summary=flight_summary
+    )
     
     try:
         response = llm.invoke(prompt)
@@ -446,66 +407,51 @@ Provide a natural, helpful response about the flight options. Be conversational 
         return f"I found {len(flights_data)} flight options for your {destination} trip from {user_city}. The cheapest option is {cheapest_flight.get('airline', 'N/A')} at ₹{cheapest_flight.get('price_in_inr', 'N/A')} INR. Would you like more details about the flight options?"
 
 def _extract_planning_details(user_input: str, context: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract trip details only when user is actually ready to plan"""
+    """Extract trip details using intelligent LLM-based extraction"""
     llm = get_llm(temperature=0.2)
     
     # Get conversation context to understand what they might be referring to
-    recent_destinations = []
     chat_context = context.get('_chat_context', '')
     
-    prompt = f"""Extract specific trip planning details from: "{user_input}"
-
-Context from conversation: {chat_context}
-
-Only extract details that are EXPLICITLY mentioned or clearly implied. 
-
-Return JSON with any of these keys (only if stated/implied):
-- destination: specific place name (if user says "plan a trip from delhi" and we were discussing Rajasthan, destination could be inferred)
-- origin: departure city  
-- date: travel date (YYYY-MM-DD if possible)
-- duration: number of days
-- travelers: number of people
-- budget: budget amount
-
-Current context: {context}
-Return JSON only.
-"""
+    prompt = format_prompt(
+        PromptType.PLANNING_DETAILS_EXTRACTION,
+        user_input=user_input,
+        chat_context=chat_context,
+        context=context
+    )
     
     try:
         response = llm.invoke(prompt).content.strip()
-        import json
-        json_match = re.search(r'\{.*\}', response, re.DOTALL)
+        json_match = search(r'\{.*\}', response, DOTALL)
+
         if json_match:
-            extracted = json.loads(json_match.group())
+            extracted = loads(json_match.group())
+
             # Only return valid extractions
             valid_data = {}
+
             for key, value in extracted.items():
                 if value and str(value).strip():
                     valid_data[key] = value
+
             return valid_data
-    except Exception as e:
-        print(f"Detail extraction failed: {e}")
+    except Exception as e:    
+        # Enhanced LLM fallback for robust extraction
+        try:
+            prompt = format_prompt(
+                PromptType.FALLBACK_DETAIL_EXTRACTION,
+                user_input=user_input
+            )
+            
+            fallback_response = llm.invoke(prompt).content.strip()
+            json_match = search(r'\{.*\}', fallback_response, DOTALL)
+
+            if json_match:
+                return loads(json_match.group())
+        except Exception:
+            pass
     
-    # Fallback: simple keyword extraction
-    fallback_data = {}
-    lower_input = user_input.lower()
-    
-    # Extract duration
-    duration_match = re.search(r'(\d+)\s*days?', lower_input)
-    if duration_match:
-        fallback_data['duration'] = int(duration_match.group(1))
-    
-    # Extract travelers
-    traveler_match = re.search(r'(\d+)\s*(?:people|person|travelers?)', lower_input)
-    if traveler_match:
-        fallback_data['travelers'] = int(traveler_match.group(1))
-    
-    # Extract origin city
-    from_match = re.search(r'from\s+([A-Za-z\s]+?)(?:\s|$|,)', user_input, re.IGNORECASE)
-    if from_match:
-        fallback_data['origin'] = from_match.group(1).strip().title()
-    
-    return fallback_data
+    return {}
 
 def conversation_agent(state: ConversationAgentState):
     """Modern, intelligent conversation agent that handles exploration and planning naturally"""
@@ -514,43 +460,118 @@ def conversation_agent(state: ConversationAgentState):
     chat_history = state.get('chat_history', []) or []
     context = state.get('context', {}) or {}
     
-    # Keep track of conversation context for better understanding
-    recent_mentions = []
-    for msg in chat_history[-6:]:
-        if isinstance(msg, dict) and msg.get('role') == 'assistant':
-            content = msg.get('content', '')
-            # Extract place names mentioned in recent responses
-            place_matches = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', content)
-            recent_mentions.extend([p for p in place_matches if len(p) > 3])
+    # SAFETY CHECK: Screen user input first
+    safety_check = screen_user_input_safety(user_input)
+
+    if not safety_check.get('is_safe', True):
+        concern_type = safety_check.get('concern_type', 'unknown')
+
+        # Return appropriate refusal response
+        refusal_response = get_safety_refusal_response(
+            concern_type, 
+            safety_check.get('suggested_response', '')
+        )
+        
+        return {
+            'response': refusal_response,
+            'context': context,
+            'planning_stage': 'safety_refusal',
+            'missing_info': False,
+            'safety_concern': concern_type
+        }
     
-    context['_recent_mentions'] = list(set(recent_mentions))
-    context['_chat_context'] = ' '.join([msg.get('content', '')[:100] for msg in chat_history[-3:] if isinstance(msg, dict)])
+    # Continue with normal conversation processing...
+    
+    # Enhanced LLM-based context extraction for better understanding
+    llm = get_llm(temperature=0.3)
+    
+    # Extract context from recent conversation using LLM
+    recent_msgs = [msg.get('content', '')[:200] for msg in chat_history[-6:] if isinstance(msg, dict)]
+    recent_conversation = ' '.join(recent_msgs)
+    
+    if recent_conversation.strip():
+        prompt = format_prompt(
+            PromptType.SEMANTIC_CONTEXT_EXTRACTION,
+            recent_conversation=recent_conversation
+        )
+        
+        try:
+            context_response = llm.invoke(prompt).content.strip()
+            json_match = search(r'\{.*\}', context_response, DOTALL)
+
+            if json_match:
+                extracted_context = loads(json_match.group())
+                context['_recent_mentions'] = extracted_context.get('recent_mentions', [])
+                context['_geographic_context'] = extracted_context.get('geographic_context', [])
+                context['_temporal_context'] = extracted_context.get('temporal_context', [])
+                context['_geographic_constraints'] = extracted_context.get('geographic_constraints', [])
+        except Exception as e:
+            # Fallback to simple extraction
+            context['_recent_mentions'] = []
+            context['_geographic_context'] = []
+            context['_temporal_context'] = []
+            context['_geographic_constraints'] = []
+    
+    # Enhanced chat context with geographic and temporal awareness
+    context['_chat_context'] = ' '.join(recent_msgs[-3:])
+    
+    # Add specific context for follow-up requests using semantic understanding
+    llm = get_llm(temperature=0.3)
+    
+    # Check if this is a follow-up request semantically
+    prompt = format_prompt(
+        PromptType.SEMANTIC_FOLLOWUP_DETECTION,
+        user_input=user_input
+    )
+    
+    try:
+        is_followup = llm.invoke(prompt).content.strip().lower() == 'yes'
+        context['_is_followup_request'] = is_followup
+        if is_followup:
+            geo_context = context.get('_geographic_context', [])
+            geo_constraints = context.get('_geographic_constraints', [])
+            time_context = context.get('_temporal_context', [])
+            
+            follow_up_parts = []
+            if geo_constraints:
+                follow_up_parts.append(f"Geographic constraint: {', '.join(geo_constraints[:2])}")
+            elif geo_context:
+                follow_up_parts.append(f"Previous context: {', '.join(geo_context[:3])}")
+            if time_context:
+                follow_up_parts.append(f"Time context: {', '.join(time_context[:2])}")
+            
+            if follow_up_parts:
+                context['_follow_up_context'] = ' '.join(follow_up_parts)
+    except Exception:
+        # Fallback to simple keyword check
+        is_followup = any(word in user_input.lower() for word in ['more', 'few more', 'other', 'additional', 'alternative'])
+        context['_is_followup_request'] = is_followup
+        if is_followup:
+            geo_context = context.get('_geographic_context', [])
+            geo_constraints = context.get('_geographic_constraints', [])
+            time_context = context.get('_temporal_context', [])
+            
+            follow_up_parts = []
+            if geo_constraints:
+                follow_up_parts.append(f"Geographic constraint: {', '.join(geo_constraints[:2])}")
+            elif geo_context:
+                follow_up_parts.append(f"Previous context: {', '.join(geo_context[:3])}")
+            if time_context:
+                follow_up_parts.append(f"Time context: {', '.join(time_context[:2])}")
+            
+            if follow_up_parts:
+                context['_follow_up_context'] = ' '.join(follow_up_parts)
     
     # Classify user intent with LLM
     intent_data = _classify_user_intent(user_input, chat_history)
     intent = intent_data.get('intent', 'chat')
     
-    print(f"[DEBUG] User intent: {intent_data}")
-    
     # Handle different intents
+    response = ""
     if intent == 'explore':
         response = _handle_exploration(user_input, intent_data, context)
-        return {
-            'response': response,
-            'context': context,
-            'planning_stage': 'explore',
-            'missing_info': False
-        }
-    
     elif intent == 'chat':
         response = _handle_general_chat(user_input, context)
-        return {
-            'response': response,
-            'context': context,
-            'planning_stage': 'chat',
-            'missing_info': False
-        }
-    
     elif intent == 'plan':
         # Extract planning details
         extracted = _extract_planning_details(user_input, context)
@@ -577,49 +598,51 @@ def conversation_agent(state: ConversationAgentState):
             llm = get_llm(temperature=0.3)
             mentions = context['_recent_mentions'][:5]  # Limit to avoid token overflow
             
-            prompt = f"""The user said: "{user_input}"
-
-Recently mentioned places in our conversation: {mentions}
-
-Are they likely referring to one of these places for their trip planning? If yes, which one? If unclear, return "unclear".
-
-Return just the place name or "unclear".
-"""
+            prompt = format_prompt(
+                PromptType.DESTINATION_INFERENCE,
+                user_input=user_input,
+                mentions=mentions
+            )
             
             try:
                 inferred = llm.invoke(prompt).content.strip().strip('"\'')
                 if inferred.lower() != 'unclear' and inferred in mentions:
                     context['destination'] = inferred
                     has_destination = True
-                    print(f"[DEBUG] Inferred destination: {inferred}")
             except Exception:
                 pass
         
         if not has_destination:
             # Ask them to specify destination
             response = "Which destination would you like me to plan for? I can help you choose from the places we discussed or somewhere completely new!"
+        else:
+            # Ready to hand off to trip planner
             return {
-                'response': response,
+                'response': '',  # Trip planner will handle the response
                 'context': context,
                 'planning_stage': 'plan',
-                'missing_info': True
+                'missing_info': False,
+                'ready_for_planning': True
             }
-        
-        # Ready to hand off to trip planner
-        return {
-            'response': '',  # Trip planner will handle the response
-            'context': context,
-            'planning_stage': 'plan',
-            'missing_info': False,
-            'ready_for_planning': True
-        }
     
     # Fallback
+    if not response:
+        response = "I'm here to help you plan amazing trips! What kind of adventure are you thinking about?"
+    
+    # SAFETY CHECK: Validate response before returning
+    response_safety = validate_response_safety(response, user_input)
+    
+    if not response_safety.get('is_safe', True):
+        improved_response = response_safety.get('improved_response', '')
+        if improved_response and improved_response.strip():
+            response = improved_response
+    
     return {
-        'response': "I'm here to help you plan amazing trips! What kind of adventure are you thinking about?",
+        'response': response,
         'context': context,
-        'planning_stage': 'chat',
-        'missing_info': False
+        'planning_stage': 'chat' if intent == 'chat' else 'explore',
+        'missing_info': False,
+        'safety_validated': True
     }
 
 def build_conversation_graph():

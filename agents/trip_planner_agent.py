@@ -1,24 +1,22 @@
+from classTypes.class_types import TripPlannerState
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from prompts import format_prompt, PromptType
 from tools.activity import get_activity_tool
 from tools.flight import get_flight_tool
 from tools.map import get_map_tool
 from tools.weather import get_weather_tool
 from tools.assembler import get_assembler_tool
 from tools.budget import get_budget_tool
-from classTypes.class_types import TripPlannerState
 from utils.set_llm import get_llm
-
-from datetime import datetime
-import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import time
+from utils.safety import (
+    validate_response_safety, 
+    is_sensitive_destination
+)
 
 
 def trip_planner_node(state: TripPlannerState):
     """Simplified trip planning node - only runs when user is ready to plan"""
     ctx = state.get('context', {}) or {}
-    user_input = state.get('user_input', '')
-    
-    print(f"[DEBUG] trip_planner_node context: {ctx}")
     
     # Extract basic requirements
     destination = ctx.get('destination')
@@ -53,7 +51,10 @@ def trip_planner_node(state: TripPlannerState):
     if not duration:
         # Intelligent duration suggestion based on destination
         llm = get_llm()
-        prompt = f"""Suggest an ideal trip duration for {destination} in 3-7 words. Consider typical tourist activities and travel distance. Just state the recommendation naturally, like "I'd recommend 5 days" or "A week would be perfect"."""
+        prompt = format_prompt(
+            PromptType.DURATION_SUGGESTION,
+            destination=destination
+        )
         
         try:
             suggestion = llm.invoke(prompt).content.strip()
@@ -73,7 +74,10 @@ def trip_planner_node(state: TripPlannerState):
     if not start_date:
         # Intelligent date suggestion based on destination
         llm = get_llm()
-        prompt = f"""What is the best time of year to visit {destination}? Consider weather, crowds, and local events. Suggest the best months and explain why in 2-3 sentences."""
+        prompt = format_prompt(
+            PromptType.BEST_TIME_SUGGESTION,
+            destination=destination
+        )
         
         try:
             suggestion = llm.invoke(prompt).content.strip()
@@ -137,10 +141,7 @@ def trip_planner_node(state: TripPlannerState):
                 return ('budget', budget_tool.func(budget_input))
             return ('budget', None)
         
-        # Execute tools in parallel for independent operations
-        print(f"[DEBUG] Running tools in parallel for {destination}")
-        start_time = time.time()
-        
+        # Execute tools in parallel for independent operations        
         with ThreadPoolExecutor(max_workers=4) as executor:
             # Submit all independent tool calls
             future_to_tool = {
@@ -163,13 +164,9 @@ def trip_planner_node(state: TripPlannerState):
                     key, result = future.result(timeout=15)  # 15s timeout per tool
                     if result:
                         results[key] = result
-                        print(f"[DEBUG] ✅ {tool_name} completed")
-                except Exception as e:
-                    print(f"[DEBUG] ❌ {tool_name} failed: {e}")
+                except Exception:
                     # Continue with other tools even if one fails
-                    
-        execution_time = time.time() - start_time
-        print(f"[DEBUG] Parallel tool execution completed in {execution_time:.2f}s")
+                    pass
         
         # Extract flight cost and currency for budget calculations
         if 'flights' in results:
@@ -180,10 +177,9 @@ def trip_planner_node(state: TripPlannerState):
                     cheapest_flight = min(flights_data, key=lambda x: x.get('price', float('inf')))
                     ctx['flight_cost'] = cheapest_flight.get('price')
                     ctx['flight_currency'] = cheapest_flight.get('currency', 'USD')
-                    print(f"[DEBUG] Extracted flight cost: {ctx['flight_cost']} {ctx['flight_currency']}")
-            except Exception as e:
-                print(f"[DEBUG] Failed to extract flight cost: {e}")
-        
+            except Exception:
+                pass
+
         # Store all tool results in context for later reference
         ctx['tool_results'] = results
         ctx['last_trip_data'] = {
@@ -194,6 +190,21 @@ def trip_planner_node(state: TripPlannerState):
             'number_of_travelers': travelers,
             **results
         }
+        
+        # Check for critical failures and inform user upfront
+        critical_issues = []
+        
+        # Check flight search failures
+        if 'flights' in results:
+            flights_data = results['flights']
+            if isinstance(flights_data, list) and flights_data and 'error' in flights_data[0]:
+                critical_issues.append(f"✈️ **Flight Search**: {flights_data[0]['error']}")
+        
+        # Check weather failures 
+        if 'weather' in results:
+            weather_data = results['weather']
+            if isinstance(weather_data, str) and ('could not find' in weather_data.lower() or 'error' in weather_data.lower()):
+                critical_issues.append(f"🌤️ **Weather**: I couldn't get weather data for {destination}")
         
         # Assemble everything into a coherent itinerary
         assembler_tool = get_assembler_tool()
@@ -209,15 +220,36 @@ def trip_planner_node(state: TripPlannerState):
         
         itinerary = assembler_tool.func(trip_data)
         
+        # Add critical issues notification to the response if any
+        if critical_issues:
+            issues_text = "\n".join(critical_issues)
+            final_response = f"🌟 **Your {destination} Trip Plan** 🌟\n\n**⚠️ Important Notes:**\n{issues_text}\n\n{itinerary}\n\n💡 **Need Help?** Feel free to ask about any specific aspect of your trip or let me know if you'd like me to search for alternatives!"
+        else:
+            final_response = itinerary
+        
+        # SAFETY CHECK: Validate final response for responsible travel advice
+        context_info = f"Trip planning for {destination} from {user_city} for {travelers} travelers"
+        response_safety = validate_response_safety(final_response, context_info)
+        
+        if not response_safety.get('is_safe', True):
+            improved_response = response_safety.get('improved_response', '')
+            if improved_response and improved_response.strip():
+                final_response = improved_response
+
+        # Add extra safety warnings for sensitive destinations
+        if is_sensitive_destination(destination):
+            safety_disclaimer = f"\n\n🛡️ **Important Safety Notice**: {destination} may require special precautions. Please check current travel advisories, local laws, and safety conditions before traveling. Consider consulting your country's travel advisory services."
+            final_response += safety_disclaimer
+
         return {
-            "response": itinerary,
+            "response": final_response,
             "missing_info": False,
             "context": ctx,
-            "planning_stage": "completed"
+            "planning_stage": "completed",
+            "safety_validated": True
         }
-        
+
     except Exception as e:
-        print(f"[ERROR] Trip planning failed: {e}")
         return {
             "response": f"I encountered an issue while planning your trip. Let me try to help you manually - could you please provide your destination, departure city, travel dates, and number of travelers?",
             "missing_info": True,

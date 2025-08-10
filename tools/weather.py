@@ -30,7 +30,6 @@ WEATHER_CODE_MAP = {
 
 @lru_cache(maxsize=128)
 def get_lat_lon(city: str):
-    print(f"[API CALL] Open-Meteo: get_lat_lon(city={city})")
     """
     Uses Open-Meteo's geocoding API to get latitude and longitude for a city.
     """
@@ -54,7 +53,6 @@ def get_lat_lon(city: str):
 
 
 def get_weather(city: str, date: str) -> str:
-    print(f"[API CALL] Open-Meteo: get_weather(city={city}, date={date})")
     """
     Gets weather for the given city and date using Open-Meteo API.
     If forecast is not available for the date, returns current weather.

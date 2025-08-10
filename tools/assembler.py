@@ -1,7 +1,9 @@
+from hashlib import md5
 from langchain.tools import Tool
+from prompts import format_prompt, PromptType
+from re import finditer, IGNORECASE
+from tools.currency import convert_amount
 from utils.set_llm import get_llm
-import re
-import hashlib
 
 
 def _create_itinerary_cache_key(trip_data: dict) -> str:
@@ -17,7 +19,7 @@ def _create_itinerary_cache_key(trip_data: dict) -> str:
         'has_budget': bool(trip_data.get('budget'))
     }
     key_str = str(sorted(key_params.items()))
-    return hashlib.md5(key_str.encode()).hexdigest()[:8]
+    return md5(key_str.encode()).hexdigest()[:8]
 
 
 # Simple cache for assembled itineraries
@@ -26,9 +28,7 @@ _itinerary_cache = {}
 
 def _convert_usd_to_inr_in_text(text: str) -> str:
     """Convert any USD amounts found in text to INR and append the conversion"""
-    try:
-        from tools.currency import convert_amount
-        
+    try:        
         # Find USD amounts in the text (patterns like $500, USD 500, $1,200, etc.)
         usd_patterns = [
             r'\$(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)',  # $500, $1,200, $1,200.50
@@ -40,7 +40,7 @@ def _convert_usd_to_inr_in_text(text: str) -> str:
         conversions_made = []
         
         for pattern in usd_patterns:
-            matches = re.finditer(pattern, text, re.IGNORECASE)
+            matches = finditer(pattern, text, IGNORECASE)
             for match in matches:
                 amount_str = match.group(1).replace(',', '')  # Remove commas
                 try:
@@ -58,8 +58,7 @@ def _convert_usd_to_inr_in_text(text: str) -> str:
                 
         return converted_text
         
-    except Exception as e:
-        print(f"[DEBUG] Currency conversion in text failed: {e}")
+    except Exception:
         return text
 
 
@@ -79,7 +78,6 @@ def assemble_itinerary(trip_data: dict) -> str:
     # Check cache first
     cache_key = _create_itinerary_cache_key(trip_data)
     if cache_key in _itinerary_cache:
-        print(f"[CACHE HIT] Using cached itinerary for key {cache_key}")
         cached_result = _itinerary_cache[cache_key]
         return _convert_usd_to_inr_in_text(cached_result)  # Always apply currency conversion
     
@@ -98,19 +96,11 @@ def assemble_itinerary(trip_data: dict) -> str:
     if trip_data.get('nearby'):
         data_summary.append("📍 Nearby places information available")
     
-    prompt = (
-        f"Create a comprehensive, engaging travel itinerary for {destination} using the following data:\n\n"
-        f"📊 Available Data: {', '.join(data_summary)}\n\n"
-        f"🗂️ Trip Details:\n{trip_data}\n\n"
-        "📋 Requirements:\n"
-        "- Create a day-by-day plan if duration is specified\n"
-        "- Include all available information (flights, weather, activities, budget)\n"
-        "- Make it engaging and user-friendly\n"
-        "- Highlight important details with emojis\n"
-        "- Include practical travel tips\n"
-        "- Structure with clear headings and sections\n"
-        "- All prices should be in INR (Indian Rupees)\n"
-        "- Be enthusiastic but informative"
+    prompt = format_prompt(
+        PromptType.ITINERARY_ASSEMBLY,
+        destination=destination,
+        data_summary=', '.join(data_summary),
+        trip_data=trip_data
     )
 
     try:
@@ -119,15 +109,13 @@ def assemble_itinerary(trip_data: dict) -> str:
         
         # Cache the raw result (before currency conversion)
         _itinerary_cache[cache_key] = itinerary_text
-        print(f"[CACHE] Itinerary cached with key {cache_key}")
         
         # Convert any remaining USD amounts to INR for user clarity
         itinerary_with_conversions = _convert_usd_to_inr_in_text(itinerary_text)
         
         return itinerary_with_conversions
-        
-    except Exception as e:
-        print(f"[ERROR] Itinerary assembly failed: {e}")
+
+    except Exception:
         return f"Sorry, I couldn't assemble the itinerary at this time. Here's what I have for {destination}: {str(trip_data)[:500]}..."
 
 
