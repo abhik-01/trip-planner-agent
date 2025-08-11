@@ -1,3 +1,14 @@
+---
+title: trip-planner
+emoji: 🌍
+colorFrom: indigo
+colorTo: blue
+sdk: gradio
+sdk_version: 5.42.0
+app_file: main.py
+pinned: false
+---
+
 # Trip Planner AI
 
 A modern conversational AI system for intelligent trip planning built with advanced multi-agent architecture and LLM-powered natural language understanding. The system transforms travel planning from rigid form-filling to natural conversations using sophisticated agent orchestration and semantic intent classification.
