@@ -3,11 +3,39 @@ html, body {
     height: 100%; 
     margin: 0;
     padding: 0;
+    overflow-x: hidden;
+}
+
+/* Remove any default spacing from Gradio elements */
+.gradio-container,
+.gradio-container > div,
+.gr-form {
+    margin-bottom: 0 !important;
+    padding-bottom: 5px !important;
 }
 
 .gradio-container { 
     max-width: 100% !important;
     box-sizing: border-box !important;
+}
+
+/* Welcome container styling */
+.welcome-container {
+    text-align: center !important;
+    padding: 5px 20px !important;   /* Reduced from 10px to 5px */
+    margin: 0 auto !important;
+    background: transparent !important;
+    min-height: 20px !important;    /* Reduced from 30px to 20px */
+}
+
+/* Hide welcome area when chatbot has messages */
+#main-chatbot:not(:empty) ~ * .welcome-container,
+#main-chatbot:not(:empty) + * .welcome-container {
+    display: none !important;
+    height: 0 !important;
+    min-height: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
 }
 
 /* Prevent any horizontal overflow */
@@ -121,7 +149,13 @@ button[aria-label="Clear"],
     box-shadow: none !important;
     max-width: 900px !important;
     margin: 0 auto !important;
-    padding-top: 20px !important;
+    padding-top: 5px !important;   /* Reduced from 20px to 5px for welcome page */
+}
+
+/* When chatbot has messages, restore normal padding for chat mode */
+#main-chatbot:not(:empty),
+#main-chatbot:not(:empty) .gradio-chatbot {
+    padding-top: 20px !important;  /* Restore padding for chat mode */
 }
 
 /* Remove all possible container styling */
@@ -219,11 +253,17 @@ button[aria-label="Clear"],
     height: 0 !important; 
 }
 
-/* Modern ChatGPT-like input styling */
+/* Modern ChatGPT-like input styling - reduced bottom padding */
 .message-input-container {
     max-width: 100% !important;
-    margin: 0 auto !important;
-    padding: 20px !important;
+    margin: -20px auto 0 auto !important;  /* Added negative top margin to pull up */
+    padding: 5px 10px 5px 10px !important;  /* Reduced top padding from 10px to 5px */
+}
+
+/* Restore normal margin when chatbot has messages (chat mode) */
+#main-chatbot:not(:empty) ~ .message-input-container,
+.message-input-container:has(~ #main-chatbot:not(:empty)) {
+    margin: 0 auto !important;  /* Normal margin for chat mode */
 }
 
 /* Main container - this is the parent textbox that should get the styling */
@@ -340,23 +380,48 @@ button[aria-label="Clear"],
     flex-direction: column !important;
     align-items: center !important;
     justify-content: center !important;
-    min-height: 150px !important;
+    min-height: 20px !important;    /* Reduced from 30px to 20px */
     text-align: center !important;
-    padding: 15px !important;
+    padding: 2px !important;        /* Reduced from 5px to 2px */
     opacity: 1 !important;
     overflow: hidden !important;
 }
 
+/* Welcome area styling - overlay approach to not affect layout */
+#welcome-area {
+    position: absolute !important;
+    top: 20px !important;
+    left: 50% !important;
+    transform: translateX(-50%) !important;
+    z-index: 1000 !important;
+    width: 100% !important;
+    max-width: 900px !important;
+    pointer-events: none !important;  /* Allow clicks to pass through */
+}
+
+#welcome-area * {
+    pointer-events: auto !important;  /* But allow welcome content to be clickable */
+}
+
+#welcome-area > div {
+    margin: 0 auto !important;
+    padding: 5px !important;
+}
+
 /* Immediate hide when fade-out class is applied */
 .welcome-container.fade-out {
+    display: none !important;
     opacity: 0 !important;
     min-height: 0 !important;
+    height: 0 !important;
     padding: 0 !important;
     margin: 0 !important;
 }
 
 /* Ensure welcome area component doesn't take space when hidden */
-#welcome-area.hidden {
+#welcome-area.hidden,
+#welcome-area:has(.fade-out),
+#welcome-area.fade-out {
     display: none !important;
     height: 0 !important;
     min-height: 0 !important;
@@ -365,26 +430,43 @@ button[aria-label="Clear"],
     opacity: 0 !important;
 }
 
-/* Modern ChatGPT-like input styling */
+/* Also target any Gradio wrapper elements that might contain the welcome area */
+div:has(#welcome-area.hidden),
+div:has(#welcome-area.fade-out),
+.gradio-html:has(.fade-out) {
+    display: none !important;
+    height: 0 !important;
+    min-height: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+}
+
+/* Modern ChatGPT-like input styling - reduced bottom padding */
 .message-input-container {
     max-width: 100% !important;
     margin: 0 auto !important;
-    padding: 10px !important;
+    padding: 10px 10px 5px 10px !important;
 }
 
-/* Chatbot - simple styling with minimal padding */
+/* Chatbot - base styling with minimal padding */
 #main-chatbot {
     background: transparent !important;
     border: none !important;
     max-width: 900px !important;
     margin: 0 auto !important;
     padding: 10px !important;
+    min-height: 300px !important; /* More reasonable height when welcome area is overlay */
+}
+
+/* When chatbot has messages (not empty), use larger height */
+#main-chatbot:not(:empty) {
+    min-height: calc(100vh - 180px) !important;
+    height: calc(100vh - 180px) !important;
 }
 
 /* Prefer small viewport units when supported */
 @supports (height: 100svh) {
-    .welcome-container { min-height: calc(100svh - 160px) !important; }
-    #main-chatbot { min-height: calc(100svh - 160px) !important; }
+    .welcome-container { min-height: calc(100svh - 800px) !important; }  /* Increased from 700px to 800px to make it even smaller */
 }
 
 .welcome-content {
@@ -393,18 +475,18 @@ button[aria-label="Clear"],
 }
 
 .welcome-title {
-    font-size: 48px !important;
+    font-size: 36px !important;
     font-weight: 600 !important;
-    margin: 0 0 16px 0 !important;
+    margin: 0 0 8px 0 !important;
     color: #ececf1 !important;
     background: transparent !important;
 }
 
 .welcome-subtitle {
-    font-size: 20px !important;
+    font-size: 16px !important;
     color: #8e8ea0 !important;
     margin: 0 !important;
-    line-height: 1.5 !important;
+    line-height: 1.3 !important;
     background: transparent !important;
 }
 

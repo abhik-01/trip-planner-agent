@@ -20,6 +20,64 @@ from utils.safety import (
 ConversationAgentState = TripPlannerState
 
 
+def _has_active_planning_context(context: Dict[str, Any], user_input: str) -> bool:
+    """
+    Check if user has active planning context and should continue in planning mode.
+    This prevents intent classification failures when chat history is incomplete.
+    """
+    # Basic planning context check - need at least a destination
+    has_basic_context = bool(context.get('destination'))
+    
+    if not has_basic_context:
+        return False
+    
+    # Use LLM to intelligently detect if user wants a new trip
+    llm = get_llm(temperature=0.1)  # Low temperature for consistent classification
+    
+    prompt = format_prompt(
+        PromptType.NEW_TRIP_DETECTION,
+        user_input=user_input,
+        current_destination=context.get('destination', 'Unknown')
+    )
+    
+    try:
+        response = llm.invoke(prompt).content.strip().lower()
+        wants_new_trip = response == 'yes'
+        
+        # If user wants new trip, clear old context immediately
+        if wants_new_trip and has_basic_context:
+            keys_to_clear = ['destination', 'user_city', 'number_of_travelers', 'duration_days', 'start_date']
+            for key in keys_to_clear:
+                context.pop(key, None)
+            return False  # Use normal intent classification for new trip
+    except Exception:
+        # Fallback to basic keyword detection as last resort
+        fallback_signals = ['new trip', 'different destination', 'start over']
+        wants_new_trip = any(signal in user_input.lower() for signal in fallback_signals)
+        if wants_new_trip:
+            keys_to_clear = ['destination', 'user_city', 'number_of_travelers', 'duration_days', 'start_date']
+            for key in keys_to_clear:
+                context.pop(key, None)
+            return False
+    
+    # Use LLM to detect non-planning queries that should use normal intent classification
+    prompt = format_prompt(
+        PromptType.NON_PLANNING_DETECTION,
+        user_input=user_input
+    )
+    
+    try:
+        response = llm.invoke(prompt).content.strip().lower()
+        is_non_planning = response == 'yes'
+    except Exception:
+        # Fallback to basic keyword detection
+        fallback_queries = ['weather today', 'what can you do', 'help me', 'your capabilities']
+        is_non_planning = any(query in user_input.lower() for query in fallback_queries)
+    
+    # Continue planning if we have context and user isn't starting over or asking general questions
+    return has_basic_context and not wants_new_trip and not is_non_planning
+
+
 def _classify_user_intent(user_input: str, chat_history: List[Dict[str,str]]) -> Dict[str, Any]:
     """Use intelligent LLM-based intent classification instead of hardcoded keywords"""
     return IntelligentIntentClassifier.classify_intent(user_input, chat_history)
@@ -562,9 +620,21 @@ def conversation_agent(state: ConversationAgentState):
             if follow_up_parts:
                 context['_follow_up_context'] = ' '.join(follow_up_parts)
     
-    # Classify user intent with LLM
-    intent_data = _classify_user_intent(user_input, chat_history)
-    intent = intent_data.get('intent', 'chat')
+    # Enhanced context-aware intent classification
+    # Check if user has active planning context first, before relying on chat history
+    if _has_active_planning_context(context, user_input):
+        # Force planning mode for continuing conversations to prevent chat history issues
+        intent_data = {
+            'intent': 'plan',
+            'ready_to_plan': True,
+            'planning_destination': context.get('destination'),
+            'exploring': None
+        }
+        intent = 'plan'
+    else:
+        # Use normal LLM-based intent classification for new conversations
+        intent_data = _classify_user_intent(user_input, chat_history)
+        intent = intent_data.get('intent', 'chat')
     
     # Handle different intents
     response = ""

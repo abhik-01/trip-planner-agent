@@ -41,6 +41,8 @@ class PromptType(Enum):
     SEMANTIC_CONTEXT_EXTRACTION = "semantic_context_extraction"
     SEMANTIC_FOLLOWUP_DETECTION = "semantic_followup_detection"
     FALLBACK_DETAIL_EXTRACTION = "fallback_detail_extraction"
+    NEW_TRIP_DETECTION = "new_trip_detection"
+    NON_PLANNING_DETECTION = "non_planning_detection"
     
     # Tool Prompts
     FLIGHT_LOCATION_RESOLUTION = "flight_location_resolution"
@@ -406,22 +408,57 @@ Only include fields with actual values. Return {{}} if no details found.""",
             input_variables=["user_input"]
         )
         
+        cls._templates[PromptType.NEW_TRIP_DETECTION] = PromptTemplate(
+            template="""The user currently has a trip being planned to "{current_destination}".
+
+Analyze this input to determine if they want to plan a completely NEW trip (abandoning the current one):
+"{user_input}"
+
+Consider phrases like:
+- Starting fresh/over
+- Planning a different trip  
+- Changing destination completely
+- Canceling current plans
+- Wanting to go somewhere else instead
+
+Return only "yes" if they clearly want a NEW trip, or "no" if they're continuing with {current_destination}.""",
+            input_variables=["user_input", "current_destination"]
+        )
+        
+        cls._templates[PromptType.NON_PLANNING_DETECTION] = PromptTemplate(
+            template="""Analyze if this is a general question unrelated to trip planning:
+"{user_input}"
+
+Return "yes" if asking about:
+- System capabilities ("what can you do")
+- General information requests  
+- Current weather/news
+- How the assistant works
+- Greetings or general chat
+
+Return "no" if related to travel planning, destinations, or trip details.""",
+            input_variables=["user_input"]
+        )
+        
         # Tool Prompts
         cls._templates[PromptType.FLIGHT_LOCATION_RESOLUTION] = PromptTemplate(
-            template="""The user mentioned "{location}" as a travel location. I need to find the best major city with an airport for this location.
+            template="""Convert "{location}" to the best major city with an airport.
 
-If it's a:
-- Country/State: Return the most popular tourist city with major airport
-- Region: Return the main city/capital  
-- City: Return the same city if it has an airport, or nearest major city
-- Unclear: Ask for clarification
+Rules:
+- If it's a country/state: Return the most popular tourist city with major airport
+- If it's a region: Return the main city/capital  
+- If it's a city: Return the same city if it has an airport, or nearest major city
+- If unclear: Return the original location
 
 Examples:
-- "Rajasthan" → "Jaipur" (major tourist city)
-- "California" → "Los Angeles" (major hub)
-- "Europe" → "Too broad, please specify country"
+- "Rajasthan" → "Jaipur"
+- "California" → "Los Angeles"
+- "Calcutta" → "Kolkata"
+- "New York" → "New York"
 
-Best city with airport:""",
+IMPORTANT: Return ONLY the city name, nothing else.
+
+City name:""",
             input_variables=["location"]
         )
         

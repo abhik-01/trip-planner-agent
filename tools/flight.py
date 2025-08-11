@@ -27,8 +27,27 @@ def _resolve_location_intelligently(location: str) -> str:
     try:
         response = llm.invoke(prompt)
         resolved = response.content.strip().strip('"').strip()
-        if resolved and resolved.lower() != location.lower():
-            return resolved
+        
+        # Extract just the city name from the response (handle multi-line responses)
+        lines = [line.strip() for line in resolved.split('\n') if line.strip()]
+        if lines:
+            # Take the last non-empty line which should be the city name
+            city_name = lines[-1]
+            
+            # Remove common prefixes that might be in the response
+            prefixes_to_remove = [
+                "City name:", "Best city with airport:", "Answer:", 
+                "Result:", "The city is:", "City:"
+            ]
+            for prefix in prefixes_to_remove:
+                if city_name.lower().startswith(prefix.lower()):
+                    city_name = city_name[len(prefix):].strip()
+            
+            # Basic validation: city name should be reasonable length
+            if city_name and len(city_name) < 50 and not any(char in city_name for char in ['.', '?', '!']):
+                return city_name
+        
+        # If parsing fails, return original location
         return location
     except Exception:
         return location
@@ -74,10 +93,35 @@ def get_nearest_airport(city: str) -> str:
         return
 
     try:
-        # Try multiple search strategies for better coverage
-        search_terms = [resolved_city, f"{resolved_city} airport", city, f"{city} airport"]
+        # Prepare search terms with better ordering
+        search_terms = []
+        
+        # If resolved city is different and reasonable, prioritize it
+        if resolved_city.lower() != city.lower() and len(resolved_city) < 50:
+            search_terms.extend([resolved_city, f"{resolved_city} airport"])
+        
+        # Add original city terms
+        search_terms.extend([city, f"{city} airport"])
+        
+        # Add common airport codes and alternative names for known cities
+        city_alternatives = {
+            'calcutta': ['kolkata'],
+            'bombay': ['mumbai'],
+            'madras': ['chennai'],
+            'bangalore': ['bengaluru'],
+            'rajasthan': ['jaipur', 'udaipur', 'jodhpur']
+        }
+        
+        city_lower = city.lower()
+        if city_lower in city_alternatives:
+            for alt in city_alternatives[city_lower]:
+                search_terms.extend([alt, f"{alt} airport"])
         
         for search_term in search_terms:
+            # Skip overly long search terms that will cause API errors
+            if len(search_term) > 100:
+                continue
+                
             try:
                 response = client.reference_data.locations.get(
                     keyword=search_term,
@@ -106,6 +150,7 @@ def get_nearest_airport(city: str) -> str:
                     return iata_code
                     
             except ResponseError as e:
+                # Log the error but continue with next search term
                 continue
                 
         # Cache negative result to avoid repeated failures

@@ -101,7 +101,7 @@ class TripPlannerUI:
                 return False
             return role in ('user', 'assistant') and bool(content.strip())
 
-        recent_history = [m for m in history if is_real_message(m)][-8:]
+        recent_history = [m for m in history if is_real_message(m)][-12:]
 
         # Get AI response (this is the blocking operation, but user message is already shown)
         state = self.agent_chat(message, recent_history, context)
