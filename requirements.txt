@@ -2,6 +2,7 @@ langchain>=0.3.0,<0.4.0
 langchain-community>=0.3.0,<0.4.0
 langchain-core>=0.3.0,<0.4.0
 langchainhub>=0.1.14
+langgraph
 gradio
 python-dotenv>=1.0.1
 together>=0.2.11
