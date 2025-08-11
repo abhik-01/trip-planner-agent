@@ -326,7 +326,6 @@ AI: [Provides weather details from previous trip data]
 - **Real-time Data**: Live flights, maps, weather, currency exchange rates
 - **Fallback Coverage**: 100% graceful handling of API failures
 - **Rate Limiting**: Respectful API usage within provider limits
-
 ---
 
 *Built with modern Python practices, advanced AI integration, and production-ready architecture patterns for intelligent travel planning.*
